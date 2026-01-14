@@ -130,7 +130,7 @@ class SessionList implements Component {
 		this.filteredSessions = fuzzyFilter(
 			this.allSessions,
 			query,
-			(session) => `${session.id} ${session.allMessagesText} ${session.cwd}`,
+			(session) => `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}`,
 		);
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredSessions.length - 1));
 	}
@@ -145,7 +145,13 @@ class SessionList implements Component {
 		lines.push(""); // Blank line after search
 
 		if (this.filteredSessions.length === 0) {
-			lines.push(theme.fg("muted", "  No sessions found"));
+			if (this.showCwd) {
+				// "All" scope - no sessions anywhere that match filter
+				lines.push(theme.fg("muted", "  No sessions found"));
+			} else {
+				// "Current folder" scope - hint to try "all"
+				lines.push(theme.fg("muted", "  No sessions in current folder. Press Tab to view all."));
+			}
 			return lines;
 		}
 
@@ -161,14 +167,24 @@ class SessionList implements Component {
 			const session = this.filteredSessions[i];
 			const isSelected = i === this.selectedIndex;
 
-			// Normalize first message to single line
-			const normalizedMessage = session.firstMessage.replace(/\n/g, " ").trim();
+			// Use session name if set, otherwise first message
+			const hasName = !!session.name;
+			const displayText = session.name ?? session.firstMessage;
+			const normalizedMessage = displayText.replace(/\n/g, " ").trim();
 
 			// First line: cursor + message (truncate to visible width)
+			// Use warning color for custom names to distinguish from first message
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
 			const maxMsgWidth = width - 2; // Account for cursor (2 visible chars)
 			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth, "...");
-			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+			let styledMsg = truncatedMsg;
+			if (hasName) {
+				styledMsg = theme.fg("warning", truncatedMsg);
+			}
+			if (isSelected) {
+				styledMsg = theme.bold(styledMsg);
+			}
+			const messageLine = cursor + styledMsg;
 
 			// Second line: metadata (dimmed) - also truncate for safety
 			const modified = formatSessionDate(session.modified);
@@ -210,6 +226,14 @@ class SessionList implements Component {
 		// Down arrow
 		else if (kb.matches(keyData, "selectDown")) {
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + 1);
+		}
+		// Page up - jump up by maxVisible items
+		else if (kb.matches(keyData, "selectPageUp")) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+		}
+		// Page down - jump down by maxVisible items
+		else if (kb.matches(keyData, "selectPageDown")) {
+			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.maxVisible);
 		}
 		// Enter
 		else if (kb.matches(keyData, "selectConfirm")) {
@@ -298,10 +322,6 @@ export class SessionSelectorComponent extends Container {
 			this.header.setLoading(false);
 			this.sessionList.setSessions(sessions, false);
 			this.requestRender();
-			// If no sessions found, cancel
-			if (sessions.length === 0) {
-				this.onCancel();
-			}
 		});
 	}
 

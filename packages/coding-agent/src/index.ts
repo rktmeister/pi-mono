@@ -79,6 +79,7 @@ export type {
 	SessionTreeEvent,
 	ToolCallEvent,
 	ToolDefinition,
+	ToolInfo,
 	ToolRenderResultOptions,
 	ToolResultEvent,
 	TurnEndEvent,
@@ -87,8 +88,6 @@ export type {
 	UserBashEventResult,
 } from "./core/extensions/index.js";
 export {
-	createExtensionRuntime,
-	discoverAndLoadExtensions,
 	ExtensionRunner,
 	isBashToolResult,
 	isEditToolResult,
@@ -97,7 +96,6 @@ export {
 	isLsToolResult,
 	isReadToolResult,
 	isWriteToolResult,
-	loadExtensions,
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 	wrapToolsWithExtensions,
@@ -155,6 +153,7 @@ export {
 	type SessionEntryBase,
 	type SessionHeader,
 	type SessionInfo,
+	type SessionInfoEntry,
 	SessionManager,
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
@@ -265,9 +264,11 @@ export {
 } from "./modes/interactive/components/index.js";
 // Theme utilities for custom tools and extensions
 export {
+	getLanguageFromPath,
 	getMarkdownTheme,
 	getSelectListTheme,
 	getSettingsListTheme,
+	highlightCode,
 	initTheme,
 	Theme,
 	type ThemeColor,

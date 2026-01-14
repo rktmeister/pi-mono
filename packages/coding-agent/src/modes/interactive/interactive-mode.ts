@@ -16,7 +16,15 @@ import {
 	type Model,
 	type OAuthProvider,
 } from "@mariozechner/pi-ai";
-import type { AutocompleteItem, EditorComponent, EditorTheme, KeyId, SlashCommand } from "@mariozechner/pi-tui";
+import type {
+	AutocompleteItem,
+	EditorComponent,
+	EditorTheme,
+	KeyId,
+	OverlayHandle,
+	OverlayOptions,
+	SlashCommand,
+} from "@mariozechner/pi-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
@@ -34,7 +42,7 @@ import {
 	visibleWidth,
 } from "@mariozechner/pi-tui";
 import { spawn, spawnSync } from "child_process";
-import { APP_NAME, getAuthPath, getDebugLogPath, isBunBinary, VERSION } from "../../config.js";
+import { APP_NAME, getAuthPath, getDebugLogPath, isBunBinary, isBunRuntime, VERSION } from "../../config.js";
 import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.js";
 import type {
 	ExtensionContext,
@@ -286,6 +294,7 @@ export class InteractiveMode {
 			{ name: "export", description: "Export session to HTML file" },
 			{ name: "share", description: "Share session as a secret GitHub gist" },
 			{ name: "copy", description: "Copy last agent message to clipboard" },
+			{ name: "name", description: "Set session display name" },
 			{ name: "session", description: "Show session info and stats" },
 			{ name: "changelog", description: "Show changelog entries" },
 			{ name: "hotkeys", description: "Show all keyboard shortcuts" },
@@ -421,7 +430,7 @@ export class InteractiveMode {
 			theme.fg("muted", " to queue follow-up") +
 			"\n" +
 			theme.fg("dim", dequeue) +
-			theme.fg("muted", " to restore queued messages") +
+			theme.fg("muted", " to edit all queued messages") +
 			"\n" +
 			theme.fg("dim", "ctrl+v") +
 			theme.fg("muted", " to paste image") +
@@ -594,10 +603,9 @@ export class InteractiveMode {
 		const entries = parseChangelog(changelogPath);
 
 		if (!lastVersion) {
-			if (entries.length > 0) {
-				this.settingsManager.setLastChangelogVersion(VERSION);
-				return entries.map((e) => e.content).join("\n\n");
-			}
+			// Fresh install - just record the version, don't show changelog
+			this.settingsManager.setLastChangelogVersion(VERSION);
+			return undefined;
 		} else {
 			const newEntries = getNewEntries(entries, lastVersion);
 			if (newEntries.length > 0) {
@@ -677,8 +685,14 @@ export class InteractiveMode {
 				appendEntry: (customType, data) => {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
+				setSessionName: (name) => {
+					this.sessionManager.appendSessionInfo(name);
+				},
+				getSessionName: () => {
+					return this.sessionManager.getSessionName();
+				},
 				getActiveTools: () => this.session.getActiveToolNames(),
-				getAllTools: () => this.session.getAllToolNames(),
+				getAllTools: () => this.session.getAllTools(),
 				setActiveTools: (toolNames) => this.session.setActiveToolsByName(toolNames),
 				setModel: async (model) => {
 					const key = await this.session.modelRegistry.getApiKey(model);
@@ -1246,7 +1260,11 @@ export class InteractiveMode {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: { overlay?: boolean },
+		options?: {
+			overlay?: boolean;
+			overlayOptions?: OverlayOptions | (() => OverlayOptions);
+			onHandle?: (handle: OverlayHandle) => void;
+		},
 	): Promise<T> {
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
@@ -1282,8 +1300,22 @@ export class InteractiveMode {
 					if (closed) return;
 					component = c;
 					if (isOverlay) {
-						const w = (component as { width?: number }).width;
-						this.ui.showOverlay(component, w ? { width: w } : undefined);
+						// Resolve overlay options - can be static or dynamic function
+						const resolveOptions = (): OverlayOptions | undefined => {
+							if (options?.overlayOptions) {
+								const opts =
+									typeof options.overlayOptions === "function"
+										? options.overlayOptions()
+										: options.overlayOptions;
+								return opts;
+							}
+							// Fallback: use component's width property if available
+							const w = (component as { width?: number }).width;
+							return w ? { width: w } : undefined;
+						};
+						const handle = this.ui.showOverlay(component, resolveOptions());
+						// Expose handle to caller for visibility control
+						options?.onHandle?.(handle);
 					} else {
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
@@ -1439,6 +1471,11 @@ export class InteractiveMode {
 			}
 			if (text === "/copy") {
 				this.handleCopyCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/name" || text.startsWith("/name ")) {
+				this.handleNameCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -2293,11 +2330,10 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(newVersion: string): void {
-		const updateInstruction = isBunBinary
-			? theme.fg("muted", `New version ${newVersion} is available. Download from: `) +
-				theme.fg("accent", "https://github.com/badlogic/pi-mono/releases/latest")
-			: theme.fg("muted", `New version ${newVersion} is available. Run: `) +
-				theme.fg("accent", "npm install -g @mariozechner/pi-coding-agent");
+		const action = isBunBinary
+			? `Download from: ${theme.fg("accent", "https://github.com/badlogic/pi-mono/releases/latest")}`
+			: `Run: ${theme.fg("accent", `${isBunRuntime ? "bun" : "npm"} install -g @mariozechner/pi-coding-agent`)}`;
+		const updateInstruction = theme.fg("muted", `New version ${newVersion} is available. `) + action;
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
@@ -2328,6 +2364,9 @@ export class InteractiveMode {
 				const text = theme.fg("dim", `Follow-up: ${message}`);
 				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
+			const dequeueHint = this.getAppKeyDisplay("dequeue");
+			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
+			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}
 
@@ -3230,7 +3269,7 @@ export class InteractiveMode {
 			}
 
 			// Create the preview URL
-			const previewUrl = `https://shittycodingagent.ai/session?${gistId}`;
+			const previewUrl = `https://buildwithpi.ai/session?${gistId}`;
 			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 		} catch (error: unknown) {
 			if (!loader.signal.aborted) {
@@ -3255,10 +3294,34 @@ export class InteractiveMode {
 		}
 	}
 
+	private handleNameCommand(text: string): void {
+		const name = text.replace(/^\/name\s*/, "").trim();
+		if (!name) {
+			const currentName = this.sessionManager.getSessionName();
+			if (currentName) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("dim", `Session name: ${currentName}`), 1, 0));
+			} else {
+				this.showWarning("Usage: /name <name>");
+			}
+			this.ui.requestRender();
+			return;
+		}
+
+		this.sessionManager.appendSessionInfo(name);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
+		this.ui.requestRender();
+	}
+
 	private handleSessionCommand(): void {
 		const stats = this.session.getSessionStats();
+		const sessionName = this.sessionManager.getSessionName();
 
 		let info = `${theme.bold("Session Info")}\n\n`;
+		if (sessionName) {
+			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
+		}
 		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
 		info += `${theme.bold("Messages")}\n`;
@@ -3293,7 +3356,10 @@ export class InteractiveMode {
 			const content = fs.readFileSync(skillPath, "utf-8");
 			// Strip YAML frontmatter if present
 			const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
-			const message = args ? `${body}\n\n---\n\nUser: ${args}` : body;
+			const skillDir = path.dirname(skillPath);
+			const header = `Skill location: ${skillPath}\nReferences are relative to ${skillDir}.`;
+			const skillMessage = `${header}\n\n${body}`;
+			const message = args ? `${skillMessage}\n\n---\n\nUser: ${args}` : skillMessage;
 			await this.session.prompt(message);
 		} catch (err) {
 			this.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);

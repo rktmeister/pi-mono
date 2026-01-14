@@ -15,7 +15,15 @@ import type {
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
-import type { Component, EditorComponent, EditorTheme, KeyId, TUI } from "@mariozechner/pi-tui";
+import type {
+	Component,
+	EditorComponent,
+	EditorTheme,
+	KeyId,
+	OverlayHandle,
+	OverlayOptions,
+	TUI,
+} from "@mariozechner/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { BashResult } from "../bash-executor.js";
@@ -112,7 +120,13 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: { overlay?: boolean },
+		options?: {
+			overlay?: boolean;
+			/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
+			overlayOptions?: OverlayOptions | (() => OverlayOptions);
+			/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
+			onHandle?: (handle: OverlayHandle) => void;
+		},
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */
@@ -727,14 +741,24 @@ export interface ExtensionAPI {
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
+	// =========================================================================
+	// Session Metadata
+	// =========================================================================
+
+	/** Set the session display name (shown in session selector). */
+	setSessionName(name: string): void;
+
+	/** Get the current session name, if set. */
+	getSessionName(): string | undefined;
+
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
-	/** Get all configured tools (built-in + extension tools). */
-	getAllTools(): string[];
+	/** Get all configured tools with name and description. */
+	getAllTools(): ToolInfo[];
 
 	/** Set the active tools by name. */
 	setActiveTools(toolNames: string[]): void;
@@ -797,9 +821,16 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
+export type SetSessionNameHandler = (name: string) => void;
+
+export type GetSessionNameHandler = () => string | undefined;
+
 export type GetActiveToolsHandler = () => string[];
 
-export type GetAllToolsHandler = () => string[];
+/** Tool info with name and description */
+export type ToolInfo = Pick<ToolDefinition, "name" | "description">;
+
+export type GetAllToolsHandler = () => ToolInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
@@ -825,6 +856,8 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	setSessionName: SetSessionNameHandler;
+	getSessionName: GetSessionNameHandler;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;
 	setActiveTools: SetActiveToolsHandler;

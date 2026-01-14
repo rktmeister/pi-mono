@@ -56,6 +56,66 @@ tui.requestRender(); // Request a re-render
 tui.onDebug = () => console.log("Debug triggered");
 ```
 
+### Overlays
+
+Overlays render components on top of existing content without replacing it. Useful for dialogs, menus, and modal UI.
+
+```typescript
+// Show overlay with default options (centered, max 80 cols)
+const handle = tui.showOverlay(component);
+
+// Show overlay with custom positioning and sizing
+// Values can be numbers (absolute) or percentage strings (e.g., "50%")
+const handle = tui.showOverlay(component, {
+  // Sizing
+  width: 60,              // Fixed width in columns
+  width: "80%",           // Width as percentage of terminal
+  minWidth: 40,           // Minimum width floor
+  maxHeight: 20,          // Maximum height in rows
+  maxHeight: "50%",       // Maximum height as percentage of terminal
+
+  // Anchor-based positioning (default: 'center')
+  anchor: 'bottom-right', // Position relative to anchor point
+  offsetX: 2,             // Horizontal offset from anchor
+  offsetY: -1,            // Vertical offset from anchor
+
+  // Percentage-based positioning (alternative to anchor)
+  row: "25%",             // Vertical position (0%=top, 100%=bottom)
+  col: "50%",             // Horizontal position (0%=left, 100%=right)
+
+  // Absolute positioning (overrides anchor/percent)
+  row: 5,                 // Exact row position
+  col: 10,                // Exact column position
+
+  // Margin from terminal edges
+  margin: 2,              // All sides
+  margin: { top: 1, right: 2, bottom: 1, left: 2 },
+
+  // Responsive visibility
+  visible: (termWidth, termHeight) => termWidth >= 100  // Hide on narrow terminals
+});
+
+// OverlayHandle methods
+handle.hide();              // Permanently remove the overlay
+handle.setHidden(true);     // Temporarily hide (can show again)
+handle.setHidden(false);    // Show again after hiding
+handle.isHidden();          // Check if temporarily hidden
+
+// Hide topmost overlay
+tui.hideOverlay();
+
+// Check if any visible overlay is active
+tui.hasOverlay();
+```
+
+**Anchor values**: `'center'`, `'top-left'`, `'top-right'`, `'bottom-left'`, `'bottom-right'`, `'top-center'`, `'bottom-center'`, `'left-center'`, `'right-center'`
+
+**Resolution order**:
+1. `minWidth` is applied as a floor after width calculation
+2. For position: absolute `row`/`col` > percentage `row`/`col` > `anchor`
+3. `margin` clamps final position to stay within terminal bounds
+4. `visible` callback controls whether overlay renders (called each frame)
+
 ### Component Interface
 
 All components implement:

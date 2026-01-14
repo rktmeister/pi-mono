@@ -166,7 +166,9 @@ Add API keys to `~/.pi/agent/auth.json`:
 | Cerebras | `cerebras` | `CEREBRAS_API_KEY` |
 | xAI | `xai` | `XAI_API_KEY` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Vercel AI Gateway | `vercel-ai-gateway` | `AI_GATEWAY_API_KEY` |
 | ZAI | `zai` | `ZAI_API_KEY` |
+| MiniMax | `minimax` | `MINIMAX_API_KEY` |
 
 Auth file keys take priority over environment variables.
 
@@ -211,6 +213,29 @@ Credentials stored in `~/.pi/agent/auth.json`. Use `/logout` to clear.
 - **Token expired / refresh failed:** Run `/login` again for the provider to refresh credentials.
 - **Usage limits (429):** Wait for the reset window; pi will surface a friendly message with the approximate retry time.
 
+**Amazon Bedrock:**
+
+Amazon Bedrock supports multiple authentication methods:
+
+```bash
+# Option 1: AWS Profile (from ~/.aws/credentials)
+export AWS_PROFILE=your-profile-name
+
+# Option 2: IAM Access Keys
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+
+# Option 3: Bedrock API Key (bearer token)
+export AWS_BEARER_TOKEN_BEDROCK=...
+
+# Optional: Set region (defaults to us-east-1)
+export AWS_REGION=us-east-1
+
+pi --provider amazon-bedrock --model global.anthropic.claude-sonnet-4-5-20250929-v1:0
+```
+
+See [Supported foundation models in Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html).
+
 ### Quick Start
 
 ```bash
@@ -240,6 +265,7 @@ The agent reads, writes, and edits files, and executes commands via bash.
 | `/export [file]` | Export session to self-contained HTML |
 | `/share` | Upload session as secret GitHub gist, get shareable URL (requires `gh` CLI) |
 | `/session` | Show session info: path, message counts, token usage, cost |
+| `/name <name>` | Set session display name (shown in session selector) |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display full version history |
 | `/tree` | Navigate session tree in-place (search, filter, label entries) |
@@ -304,6 +330,7 @@ Both modes are configurable via `/settings`: "one-at-a-time" delivers messages o
 | Ctrl+T | Toggle thinking block visibility |
 | Ctrl+G | Edit message in external editor (`$VISUAL` or `$EDITOR`) |
 | Ctrl+V | Paste image from clipboard |
+| Alt+Up | Restore queued messages to editor |
 
 ### Custom Keybindings
 
@@ -348,6 +375,7 @@ All keyboard shortcuts can be customized via `~/.pi/agent/keybindings.json`. Eac
 | `toggleThinking` | `ctrl+t` | Toggle thinking |
 | `externalEditor` | `ctrl+g` | Open external editor |
 | `followUp` | `alt+enter` | Queue follow-up message |
+| `dequeue` | `alt+up` | Restore queued messages to editor |
 | `selectUp` | `up` | Move selection up in lists (session picker, model selector) |
 | `selectDown` | `down` | Move selection down in lists |
 | `selectConfirm` | `enter` | Confirm selection |
@@ -545,7 +573,7 @@ Use these for:
 
 ### Custom System Prompt
 
-Replace the default system prompt entirely by creating a `SYSTEM.md` file:
+Replace the default system prompt **entirely** by creating a `SYSTEM.md` file:
 
 1. **Project-local:** `.pi/SYSTEM.md` (takes precedence)
 2. **Global:** `~/.pi/agent/SYSTEM.md` (fallback)
@@ -561,7 +589,16 @@ Focus on:
 - Proper formatting
 ```
 
-The `--system-prompt` CLI flag overrides both files. Use `--append-system-prompt` to add to (rather than replace) the prompt.
+The `--system-prompt` CLI flag overrides both files.
+
+### Appending to the System Prompt
+
+To add instructions to the system prompt **without** replacing the default (preserving automatic loading of `AGENTS.md` context files, skills, and tools guidelines), create an `APPEND_SYSTEM.md` file:
+
+1. **Project-local:** `.pi/APPEND_SYSTEM.md` (takes precedence)
+2. **Global:** `~/.pi/agent/APPEND_SYSTEM.md` (fallback)
+
+The `--append-system-prompt` CLI flag overrides both files.
 
 ### Custom Models and Providers
 
@@ -1116,7 +1153,7 @@ pi [options] [@files...] [messages...]
 
 | Option | Description |
 |--------|-------------|
-| `--provider <name>` | Provider: `anthropic`, `openai`, `openai-codex`, `google`, `mistral`, `xai`, `groq`, `cerebras`, `openrouter`, `zai`, `github-copilot`, `google-gemini-cli`, `google-antigravity`, or custom |
+| `--provider <name>` | Provider: `anthropic`, `openai`, `openai-codex`, `google`, `google-vertex`, `amazon-bedrock`, `mistral`, `xai`, `groq`, `cerebras`, `openrouter`, `vercel-ai-gateway`, `zai`, `minimax`, `github-copilot`, `google-gemini-cli`, `google-antigravity`, or custom |
 | `--model <id>` | Model ID |
 | `--api-key <key>` | API key (overrides environment) |
 | `--system-prompt <text\|file>` | Custom system prompt (text or file path) |

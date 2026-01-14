@@ -5,7 +5,7 @@
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part, type Schema } from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
-import { transformMessages } from "./transorm-messages.js";
+import { transformMessages } from "./transform-messages.js";
 
 type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
 
@@ -40,6 +40,29 @@ export function isThinkingPart(part: Pick<Part, "thought" | "thoughtSignature">)
 export function retainThoughtSignature(existing: string | undefined, incoming: string | undefined): string | undefined {
 	if (typeof incoming === "string" && incoming.length > 0) return incoming;
 	return existing;
+}
+
+// Thought signatures must be base64 for Google APIs (TYPE_BYTES).
+const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
+
+function isValidThoughtSignature(signature: string | undefined): boolean {
+	if (!signature) return false;
+	if (signature.length % 4 !== 0) return false;
+	return base64SignaturePattern.test(signature);
+}
+
+/**
+ * Only keep signatures from the same provider/model and with valid base64.
+ */
+function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: string | undefined): string | undefined {
+	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
+}
+
+/**
+ * Claude models via Google APIs require explicit tool call IDs in function calls/responses.
+ */
+export function requiresToolCallId(modelId: string): boolean {
+	return modelId.startsWith("claude-");
 }
 
 /**
@@ -85,9 +108,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				if (block.type === "text") {
 					// Skip empty text blocks - they can cause issues with some models (e.g. Claude via Antigravity)
 					if (!block.text || block.text.trim() === "") continue;
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
 					parts.push({
 						text: sanitizeSurrogates(block.text),
-						...(block.textSignature && { thoughtSignature: block.textSignature }),
+						...(thoughtSignature && { thoughtSignature }),
 					});
 				} else if (block.type === "thinking") {
 					// Skip empty thinking blocks
@@ -95,10 +119,11 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					// Only keep as thinking block if same provider AND same model
 					// Otherwise convert to plain text (no tags to avoid model mimicking them)
 					if (isSameProviderAndModel) {
+						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
 						parts.push({
 							thought: true,
 							text: sanitizeSurrogates(block.thinking),
-							...(block.thinkingSignature && { thoughtSignature: block.thinkingSignature }),
+							...(thoughtSignature && { thoughtSignature }),
 						});
 					} else {
 						parts.push({
@@ -110,10 +135,12 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						functionCall: {
 							name: block.name,
 							args: block.arguments,
+							...(requiresToolCallId(model.id) ? { id: block.id } : {}),
 						},
 					};
-					if (block.thoughtSignature) {
-						part.thoughtSignature = block.thoughtSignature;
+					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
+					if (thoughtSignature) {
+						part.thoughtSignature = thoughtSignature;
 					}
 					parts.push(part);
 				}
@@ -150,12 +177,14 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				},
 			}));
 
+			const includeId = requiresToolCallId(model.id);
 			const functionResponsePart: Part = {
 				functionResponse: {
 					name: msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
 					// Nest images inside functionResponse.parts for Gemini 3
 					...(hasImages && supportsMultimodalFunctionResponse && { parts: imageParts }),
+					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
 
