@@ -16,6 +16,7 @@ import type {
 } from "@mariozechner/pi-agent-core";
 import type { ImageContent, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
 import type {
+	AutocompleteItem,
 	Component,
 	EditorComponent,
 	EditorTheme,
@@ -447,6 +448,30 @@ export interface UserBashEvent {
 }
 
 // ============================================================================
+// Input Events
+// ============================================================================
+
+/** Source of user input */
+export type InputSource = "interactive" | "rpc" | "extension";
+
+/** Fired when user input is received, before agent processing */
+export interface InputEvent {
+	type: "input";
+	/** The input text */
+	text: string;
+	/** Attached images, if any */
+	images?: ImageContent[];
+	/** Where the input came from */
+	source: InputSource;
+}
+
+/** Result from input event handler */
+export type InputEventResult =
+	| { action: "continue" }
+	| { action: "transform"; text: string; images?: ImageContent[] }
+	| { action: "handled" };
+
+// ============================================================================
 // Tool Events
 // ============================================================================
 
@@ -551,6 +576,7 @@ export type ExtensionEvent =
 	| TurnEndEvent
 	| ModelSelectEvent
 	| UserBashEvent
+	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent;
 
@@ -630,6 +656,7 @@ export type MessageRenderer<T = unknown> = (
 export interface RegisteredCommand {
 	name: string;
 	description?: string;
+	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 
@@ -675,6 +702,7 @@ export interface ExtensionAPI {
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
+	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -688,7 +716,7 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/** Register a custom command. */
-	registerCommand(name: string, options: { description?: string; handler: RegisteredCommand["handler"] }): void;
+	registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void;
 
 	/** Register a keyboard shortcut. */
 	registerShortcut(
