@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-01-16
+
 ### Added
 
-- `PI_NO_HARDWARE_CURSOR=1` environment variable to disable hardware cursor positioning for terminals with limited escape sequence support (e.g., IntelliJ IDEA's built-in terminal)
+- `EditorOptions` with optional `paddingX` for horizontal content padding, plus `getPaddingX()`/`setPaddingX()` methods ([#791](https://github.com/badlogic/pi-mono/pull/791) by [@ferologics](https://github.com/ferologics))
+
+### Changed
+
+- Hardware cursor is now disabled by default for better terminal compatibility. Set `PI_HARDWARE_CURSOR=1` to enable (replaces `PI_NO_HARDWARE_CURSOR=1` which disabled it).
+
+### Fixed
+
+- Decode Kitty CSI-u printable sequences in the editor so shifted symbol keys (e.g., `@`, `?`) work in terminals that enable Kitty keyboard protocol ([#779](https://github.com/badlogic/pi-mono/pull/779) by [@iamd3vil](https://github.com/iamd3vil))
 
 ## [0.47.0] - 2026-01-16
 
