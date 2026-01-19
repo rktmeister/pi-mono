@@ -355,6 +355,7 @@ Both modes are configurable via `/settings`: "one-at-a-time" delivers messages o
 | Ctrl+K | Delete to end of line |
 | Ctrl+Y | Paste most recently deleted text |
 | Alt+Y | Cycle through deleted text after pasting |
+| Ctrl+- | Undo |
 
 **Other:**
 
@@ -405,6 +406,7 @@ All keyboard shortcuts can be customized via `~/.pi/agent/keybindings.json`. Eac
 | `deleteToLineEnd` | `ctrl+k` | Delete to line end |
 | `yank` | `ctrl+y` | Paste most recently deleted text |
 | `yankPop` | `alt+y` | Cycle through deleted text after pasting |
+| `undo` | `ctrl+-` | Undo last edit |
 | `newLine` | `shift+enter` | Insert new line |
 | `submit` | `enter` | Submit input |
 | `tab` | `tab` | Tab/autocomplete |
@@ -541,6 +543,10 @@ pi --session /path/to/file.jsonl  # Use specific session file
 pi --session a8ec1c2a             # Resume by session ID (partial UUID)
 ```
 
+In the `/resume` picker:
+- `Ctrl+P` toggles display of the session `.jsonl` file path
+- `Ctrl+D` deletes the selected session (inline confirmation; uses `trash` if available and cannot delete the active session)
+
 **Resuming by session ID:** The `--session` flag accepts a session UUID (or prefix). Session IDs are visible in filenames under `~/.pi/agent/sessions/<project>/` (e.g., `2025-12-13T17-47-46-817Z_a8ec1c2a-5a5f-4699-88cb-03e7d3cb9292.jsonl`). The UUID is the part after the underscore. You can also search by session ID in the `pi -r` picker.
 
 ### Context Compaction
@@ -674,7 +680,10 @@ Add custom models (Ollama, vLLM, LM Studio, etc.) via `~/.pi/agent/models.json`:
 
 **Supported APIs:** `openai-completions`, `openai-responses`, `openai-codex-responses`, `anthropic-messages`, `google-generative-ai`
 
-**API key resolution:** The `apiKey` field is checked as environment variable name first, then used as literal value.
+**API key resolution:** The `apiKey` field supports three formats:
+- `"!command"` - Executes the command and uses stdout (e.g., `"!security find-generic-password -ws 'anthropic'"` for macOS Keychain, `"!op read 'op://vault/item/credential'"` for 1Password)
+- Environment variable name (e.g., `"MY_API_KEY"`) - Uses the value of the environment variable
+- Literal value - Used directly as the API key
 
 **API override:** Set `api` at provider level (default for all models) or model level (override per model).
 
@@ -732,6 +741,8 @@ To fully replace a built-in provider with custom models, include the `models` ar
 
 **OpenAI compatibility (`compat` field):**
 
+**OpenAI Completions (`openai-completions`):**
+
 | Field | Description |
 |-------|-------------|
 | `supportsStore` | Whether provider supports `store` field |
@@ -739,6 +750,14 @@ To fully replace a built-in provider with custom models, include the `models` ar
 | `supportsReasoningEffort` | Support for `reasoning_effort` parameter |
 | `supportsUsageInStreaming` | Whether provider supports `stream_options: { include_usage: true }`. Default: `true` |
 | `maxTokensField` | Use `max_completion_tokens` or `max_tokens` |
+
+**OpenAI Responses (`openai-responses`):**
+
+| Field | Description |
+|-------|-------------|
+| `strictResponsesPairing` | Enforce strict reasoning/message pairing when replaying OpenAI Responses history on providers like Azure (default: `false`) |
+
+If you see 400 errors like "item of type 'reasoning' was provided without its required following item" or "message/function_call was provided without its required reasoning item", set `compat.strictResponsesPairing: true` on the affected model in `models.json`.
 
 **Live reload:** The file reloads each time you open `/model`. Edit during session; no restart needed.
 

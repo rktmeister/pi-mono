@@ -598,6 +598,20 @@ context.messages.push({ role: 'user', content: 'Please continue' });
 const continuation = await complete(model, context);
 ```
 
+### Debugging Provider Payloads
+
+Use the `onPayload` callback to inspect the request payload sent to the provider. This is useful for debugging request formatting issues or provider validation errors.
+
+```typescript
+const response = await complete(model, context, {
+  onPayload: (payload) => {
+    console.log('Provider payload:', JSON.stringify(payload, null, 2));
+  }
+});
+```
+
+The callback is supported by `stream`, `complete`, `streamSimple`, and `completeSimple`.
+
 ## APIs, Models, and Providers
 
 The library implements 4 API interfaces, each with its own streaming function and options:
@@ -703,15 +717,19 @@ const response = await stream(ollamaModel, context, {
 
 ### OpenAI Compatibility Settings
 
-The `openai-completions` API is implemented by many providers with minor differences. By default, the library auto-detects compatibility settings based on `baseUrl` for known providers (Cerebras, xAI, Mistral, Chutes, etc.). For custom proxies or unknown endpoints, you can override these settings via the `compat` field:
+The `openai-completions` API is implemented by many providers with minor differences. By default, the library auto-detects compatibility settings based on `baseUrl` for known providers (Cerebras, xAI, Mistral, Chutes, etc.). For custom proxies or unknown endpoints, you can override these settings via the `compat` field. For `openai-responses` models, the compat field only supports Responses-specific flags.
 
 ```typescript
-interface OpenAICompat {
+interface OpenAICompletionsCompat {
   supportsStore?: boolean;           // Whether provider supports the `store` field (default: true)
   supportsDeveloperRole?: boolean;   // Whether provider supports `developer` role vs `system` (default: true)
   supportsReasoningEffort?: boolean; // Whether provider supports `reasoning_effort` (default: true)
   maxTokensField?: 'max_completion_tokens' | 'max_tokens';  // Which field name to use (default: max_completion_tokens)
   thinkingFormat?: 'openai' | 'zai'; // Format for reasoning param: 'openai' uses reasoning_effort, 'zai' uses thinking: { type: "enabled" } (default: openai)
+}
+
+interface OpenAIResponsesCompat {
+  strictResponsesPairing?: boolean; // Enforce strict reasoning/message pairing for OpenAI Responses history replay on providers like Azure (default: false)
 }
 ```
 
@@ -1082,6 +1100,9 @@ Create or update test files to cover the new provider:
 - `tool-call-without-result.test.ts` - Orphaned tool calls
 - `image-tool-result.test.ts` - Images in tool results
 - `total-tokens.test.ts` - Token counting accuracy
+- `cross-provider-handoff.test.ts` - Cross-provider context replay
+
+For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
 
 For providers with non-standard auth (AWS, Google Vertex), create a utility like `bedrock-utils.ts` with credential detection helpers.
 

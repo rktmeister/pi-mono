@@ -24,6 +24,7 @@ async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: Op
 				timestamp: Date.now(),
 			},
 		],
+		systemPrompt: "You are a helpful assistant.",
 	};
 
 	const controller = new AbortController();
@@ -86,8 +87,10 @@ describe("Token Statistics on Abort", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider", () => {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		void _compat;
 		const llm: Model<"openai-completions"> = {
-			...getModel("openai", "gpt-4o-mini")!,
+			...baseModel,
 			api: "openai-completions",
 		};
 

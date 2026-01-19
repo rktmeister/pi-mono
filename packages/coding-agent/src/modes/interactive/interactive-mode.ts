@@ -814,7 +814,7 @@ export class InteractiveMode {
 	 * Set up keyboard shortcuts registered by extensions.
 	 */
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void {
-		const shortcuts = extensionRunner.getShortcuts();
+		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size === 0) return;
 
 		// Create a context for shortcut handlers
@@ -3035,6 +3035,7 @@ export class InteractiveMode {
 					void this.shutdown();
 				},
 				() => this.ui.requestRender(),
+				this.sessionManager.getSessionFile(),
 			);
 			return { component: selector, focus: selector.getSessionList() };
 		});
@@ -3297,7 +3298,7 @@ export class InteractiveMode {
 			}
 
 			// Create the preview URL
-			const previewUrl = `https://buildwithpi.ai/session?${gistId}`;
+			const previewUrl = `https://buildwithpi.ai/session/#${gistId}`;
 			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 		} catch (error: unknown) {
 			if (!loader.signal.aborted) {
@@ -3445,6 +3446,7 @@ export class InteractiveMode {
 		const deleteToLineEnd = this.getEditorKeyDisplay("deleteToLineEnd");
 		const yank = this.getEditorKeyDisplay("yank");
 		const yankPop = this.getEditorKeyDisplay("yankPop");
+		const undo = this.getEditorKeyDisplay("undo");
 		const tab = this.getEditorKeyDisplay("tab");
 
 		// App keybindings
@@ -3480,6 +3482,7 @@ export class InteractiveMode {
 | \`${deleteToLineEnd}\` | Delete to end of line |
 | \`${yank}\` | Paste the most-recently-deleted text |
 | \`${yankPop}\` | Cycle through the deleted text after pasting |
+| \`${undo}\` | Undo |
 
 **Other**
 | Key | Action |
@@ -3505,7 +3508,7 @@ export class InteractiveMode {
 		// Add extension-registered shortcuts
 		const extensionRunner = this.session.extensionRunner;
 		if (extensionRunner) {
-			const shortcuts = extensionRunner.getShortcuts();
+			const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 			if (shortcuts.size > 0) {
 				hotkeys += `
 **Extensions**

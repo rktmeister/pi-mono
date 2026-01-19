@@ -155,6 +155,7 @@ async function handleStreaming<TApi extends Api>(model: Model<TApi>, options?: O
 
 	const context: Context = {
 		messages: [{ role: "user", content: "Count from 1 to 3", timestamp: Date.now() }],
+		systemPrompt: "You are a helpful assistant.",
 	};
 
 	const s = stream(model, context, options);
@@ -190,6 +191,7 @@ async function handleThinking<TApi extends Api>(model: Model<TApi>, options?: Op
 				timestamp: Date.now(),
 			},
 		],
+		systemPrompt: "You are a helpful assistant.",
 	};
 
 	const s = stream(model, context, options);
@@ -245,6 +247,7 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Optio
 				timestamp: Date.now(),
 			},
 		],
+		systemPrompt: "You are a helpful assistant.",
 	};
 
 	const response = await complete(model, context, options);
@@ -411,7 +414,12 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider (gpt-4o-mini)", () => {
-		const llm: Model<"openai-completions"> = { ...getModel("openai", "gpt-4o-mini"), api: "openai-completions" };
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+		void _compat;
+		const llm: Model<"openai-completions"> = {
+			...baseModel,
+			api: "openai-completions",
+		};
 
 		it("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm);

@@ -20,6 +20,7 @@ async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: Opti
 				timestamp: Date.now(),
 			},
 		],
+		systemPrompt: "You are a helpful assistant.",
 	};
 
 	let abortFired = false;
@@ -110,8 +111,10 @@ describe("AI Providers Abort Tests", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider Abort", () => {
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		void _compat;
 		const llm: Model<"openai-completions"> = {
-			...getModel("openai", "gpt-4o-mini")!,
+			...baseModel,
 			api: "openai-completions",
 		};
 
