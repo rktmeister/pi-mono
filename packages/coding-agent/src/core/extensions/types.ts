@@ -14,7 +14,18 @@ import type {
 	AgentToolUpdateCallback,
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
-import type { ImageContent, Model, TextContent, ToolResultMessage } from "@mariozechner/pi-ai";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	ImageContent,
+	Model,
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	SimpleStreamOptions,
+	TextContent,
+	ToolResultMessage,
+} from "@mariozechner/pi-ai";
 import type {
 	AutocompleteItem,
 	Component,
@@ -68,6 +79,15 @@ export interface ExtensionUIDialogOptions {
 	timeout?: number;
 }
 
+/** Placement for extension widgets. */
+export type WidgetPlacement = "aboveEditor" | "belowEditor";
+
+/** Options for extension widgets. */
+export interface ExtensionWidgetOptions {
+	/** Where the widget is rendered. Defaults to "aboveEditor". */
+	placement?: WidgetPlacement;
+}
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -91,9 +111,13 @@ export interface ExtensionUIContext {
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
-	/** Set a widget to display above the editor. Accepts string array or component factory. */
-	setWidget(key: string, content: string[] | undefined): void;
-	setWidget(key: string, content: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined): void;
+	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	setWidget(key: string, content: string[] | undefined, options?: ExtensionWidgetOptions): void;
+	setWidget(
+		key: string,
+		content: ((tui: TUI, theme: Theme) => Component & { dispose?(): void }) | undefined,
+		options?: ExtensionWidgetOptions,
+	): void;
 
 	/** Set a custom footer component, or undefined to restore the built-in footer.
 	 *
@@ -841,8 +865,120 @@ export interface ExtensionAPI {
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
 
+	// =========================================================================
+	// Provider Registration
+	// =========================================================================
+
+	/**
+	 * Register or override a model provider.
+	 *
+	 * If `models` is provided: replaces all existing models for this provider.
+	 * If only `baseUrl` is provided: overrides the URL for existing models.
+	 * If `oauth` is provided: registers OAuth provider for /login support.
+	 * If `streamSimple` is provided: registers a custom API stream handler.
+	 *
+	 * @example
+	 * // Register a new provider with custom models
+	 * pi.registerProvider("my-proxy", {
+	 *   baseUrl: "https://proxy.example.com",
+	 *   apiKey: "PROXY_API_KEY",
+	 *   api: "anthropic-messages",
+	 *   models: [
+	 *     {
+	 *       id: "claude-sonnet-4-20250514",
+	 *       name: "Claude 4 Sonnet (proxy)",
+	 *       reasoning: false,
+	 *       input: ["text", "image"],
+	 *       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	 *       contextWindow: 200000,
+	 *       maxTokens: 16384
+	 *     }
+	 *   ]
+	 * });
+	 *
+	 * @example
+	 * // Override baseUrl for an existing provider
+	 * pi.registerProvider("anthropic", {
+	 *   baseUrl: "https://proxy.example.com"
+	 * });
+	 *
+	 * @example
+	 * // Register provider with OAuth support
+	 * pi.registerProvider("corporate-ai", {
+	 *   baseUrl: "https://ai.corp.com",
+	 *   api: "openai-responses",
+	 *   models: [...],
+	 *   oauth: {
+	 *     name: "Corporate AI (SSO)",
+	 *     async login(callbacks) { ... },
+	 *     async refreshToken(credentials) { ... },
+	 *     getApiKey(credentials) { return credentials.access; }
+	 *   }
+	 * });
+	 */
+	registerProvider(name: string, config: ProviderConfig): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
+}
+
+// ============================================================================
+// Provider Registration Types
+// ============================================================================
+
+/** Configuration for registering a provider via pi.registerProvider(). */
+export interface ProviderConfig {
+	/** Base URL for the API endpoint. Required when defining models. */
+	baseUrl?: string;
+	/** API key or environment variable name. Required when defining models (unless oauth provided). */
+	apiKey?: string;
+	/** API type. Required at provider or model level when defining models. */
+	api?: Api;
+	/** Optional streamSimple handler for custom APIs. */
+	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+	/** Custom headers to include in requests. */
+	headers?: Record<string, string>;
+	/** If true, adds Authorization: Bearer header with the resolved API key. */
+	authHeader?: boolean;
+	/** Models to register. If provided, replaces all existing models for this provider. */
+	models?: ProviderModelConfig[];
+	/** OAuth provider for /login support. The `id` is set automatically from the provider name. */
+	oauth?: {
+		/** Display name for the provider in login UI. */
+		name: string;
+		/** Run the login flow, return credentials to persist. */
+		login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
+		/** Refresh expired credentials, return updated credentials to persist. */
+		refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
+		/** Convert credentials to API key string for the provider. */
+		getApiKey(credentials: OAuthCredentials): string;
+		/** Optional: modify models for this provider (e.g., update baseUrl based on credentials). */
+		modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
+	};
+}
+
+/** Configuration for a model within a provider. */
+export interface ProviderModelConfig {
+	/** Model ID (e.g., "claude-sonnet-4-20250514"). */
+	id: string;
+	/** Display name (e.g., "Claude 4 Sonnet"). */
+	name: string;
+	/** API type override for this model. */
+	api?: Api;
+	/** Whether the model supports extended thinking. */
+	reasoning: boolean;
+	/** Supported input types. */
+	input: ("text" | "image")[];
+	/** Cost per token (for tracking, can be 0). */
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	/** Maximum context window size in tokens. */
+	contextWindow: number;
+	/** Maximum output tokens. */
+	maxTokens: number;
+	/** Custom headers for this model. */
+	headers?: Record<string, string>;
+	/** OpenAI compatibility settings. */
+	compat?: Model<Api>["compat"];
 }
 
 /** Extension factory function type. Supports both sync and async initialization. */
@@ -913,6 +1049,8 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
+	/** Provider registrations queued during extension loading, processed when runner binds */
+	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig }>;
 }
 
 /**

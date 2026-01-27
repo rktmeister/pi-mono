@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete, stream } from "../src/stream.js";
-import type { Api, Context, Model, OptionsForApi } from "../src/types.js";
+import type { Api, Context, Model, StreamOptions } from "../src/types.js";
+
+type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
+
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
@@ -11,7 +15,7 @@ const [geminiCliToken, openaiCodexToken] = await Promise.all([
 	resolveApiKey("openai-codex"),
 ]);
 
-async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const context: Context = {
 		messages: [
 			{
@@ -55,7 +59,7 @@ async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: Opti
 	expect(followUp.content.length).toBeGreaterThan(0);
 }
 
-async function testImmediateAbort<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testImmediateAbort<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const controller = new AbortController();
 
 	controller.abort();
@@ -68,7 +72,7 @@ async function testImmediateAbort<TApi extends Api>(llm: Model<TApi>, options: O
 	expect(response.stopReason).toBe("aborted");
 }
 
-async function testAbortThenNewMessage<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testAbortThenNewMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	// First request: abort immediately before any response content arrives
 	const controller = new AbortController();
 	controller.abort();
@@ -136,6 +140,20 @@ describe("AI Providers Abort Tests", () => {
 
 		it("should handle immediate abort", { retry: 3 }, async () => {
 			await testImmediateAbort(llm);
+		});
+	});
+
+	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider Abort", () => {
+		const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+		const azureDeploymentName = resolveAzureDeploymentName(llm.id);
+		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
+
+		it("should abort mid-stream", { retry: 3 }, async () => {
+			await testAbortSignal(llm, azureOptions);
+		});
+
+		it("should handle immediate abort", { retry: 3 }, async () => {
+			await testImmediateAbort(llm, azureOptions);
 		});
 	});
 

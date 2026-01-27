@@ -41,7 +41,13 @@ export type EditorAction =
 	// Undo
 	| "undo"
 	// Tool output
-	| "expandTools";
+	| "expandTools"
+	// Session
+	| "toggleSessionPath"
+	| "toggleSessionSort"
+	| "renameSession"
+	| "deleteSession"
+	| "deleteSessionNoninvasive";
 
 // Re-export KeyId from keys.ts
 export type { KeyId };
@@ -72,7 +78,7 @@ export const DEFAULT_EDITOR_KEYBINDINGS: Required<EditorKeybindingsConfig> = {
 	deleteCharBackward: "backspace",
 	deleteCharForward: "delete",
 	deleteWordBackward: ["ctrl+w", "alt+backspace"],
-	deleteWordForward: "alt+d",
+	deleteWordForward: ["alt+d", "alt+delete"],
 	deleteToLineStart: "ctrl+u",
 	deleteToLineEnd: "ctrl+k",
 	// Text input
@@ -95,6 +101,12 @@ export const DEFAULT_EDITOR_KEYBINDINGS: Required<EditorKeybindingsConfig> = {
 	undo: "ctrl+-",
 	// Tool output
 	expandTools: "ctrl+o",
+	// Session
+	toggleSessionPath: "ctrl+p",
+	toggleSessionSort: "ctrl+s",
+	renameSession: "ctrl+r",
+	deleteSession: "ctrl+d",
+	deleteSessionNoninvasive: "ctrl+backspace",
 };
 
 /**

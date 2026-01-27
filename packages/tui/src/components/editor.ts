@@ -11,7 +11,7 @@ const segmenter = getSegmenter();
  * Represents a chunk of text for word-wrap layout.
  * Tracks both the text content and its position in the original line.
  */
-interface TextChunk {
+export interface TextChunk {
 	text: string;
 	startIndex: number;
 	endIndex: number;
@@ -26,7 +26,7 @@ interface TextChunk {
  * @param maxWidth - Maximum visible width per chunk
  * @returns Array of chunks with text and position information
  */
-function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
+export function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
 	if (!line || maxWidth <= 0) {
 		return [{ text: "", startIndex: 0, endIndex: 0 }];
 	}
@@ -37,154 +37,56 @@ function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
 	}
 
 	const chunks: TextChunk[] = [];
+	const segments = [...segmenter.segment(line)];
 
-	// Split into tokens (words and whitespace runs)
-	const tokens: { text: string; startIndex: number; endIndex: number; isWhitespace: boolean }[] = [];
-	let currentToken = "";
-	let tokenStart = 0;
-	let inWhitespace = false;
-	let charIndex = 0;
-
-	for (const seg of segmenter.segment(line)) {
-		const grapheme = seg.segment;
-		const graphemeIsWhitespace = isWhitespaceChar(grapheme);
-
-		if (currentToken === "") {
-			inWhitespace = graphemeIsWhitespace;
-			tokenStart = charIndex;
-		} else if (graphemeIsWhitespace !== inWhitespace) {
-			// Token type changed - save current token
-			tokens.push({
-				text: currentToken,
-				startIndex: tokenStart,
-				endIndex: charIndex,
-				isWhitespace: inWhitespace,
-			});
-			currentToken = "";
-			tokenStart = charIndex;
-			inWhitespace = graphemeIsWhitespace;
-		}
-
-		currentToken += grapheme;
-		charIndex += grapheme.length;
-	}
-
-	// Push final token
-	if (currentToken) {
-		tokens.push({
-			text: currentToken,
-			startIndex: tokenStart,
-			endIndex: charIndex,
-			isWhitespace: inWhitespace,
-		});
-	}
-
-	// Build chunks using word wrapping
-	let currentChunk = "";
 	let currentWidth = 0;
-	let chunkStartIndex = 0;
-	let atLineStart = true; // Track if we're at the start of a line (for skipping whitespace)
+	let chunkStart = 0;
 
-	for (const token of tokens) {
-		const tokenWidth = visibleWidth(token.text);
+	// Wrap opportunity: the position after the last whitespace before a non-whitespace
+	// grapheme, i.e. where a line break is allowed.
+	let wrapOppIndex = -1;
+	let wrapOppWidth = 0;
 
-		// Skip leading whitespace at line start
-		if (atLineStart && token.isWhitespace) {
-			chunkStartIndex = token.endIndex;
-			continue;
-		}
-		atLineStart = false;
+	for (let i = 0; i < segments.length; i++) {
+		const seg = segments[i]!;
+		const grapheme = seg.segment;
+		const gWidth = visibleWidth(grapheme);
+		const charIndex = seg.index;
+		const isWs = isWhitespaceChar(grapheme);
 
-		// If this single token is wider than maxWidth, we need to break it
-		if (tokenWidth > maxWidth) {
-			// First, push any accumulated chunk
-			if (currentChunk) {
-				chunks.push({
-					text: currentChunk,
-					startIndex: chunkStartIndex,
-					endIndex: token.startIndex,
-				});
-				currentChunk = "";
+		// Overflow check before advancing.
+		if (currentWidth + gWidth > maxWidth) {
+			if (wrapOppIndex >= 0) {
+				// Backtrack to last wrap opportunity.
+				chunks.push({ text: line.slice(chunkStart, wrapOppIndex), startIndex: chunkStart, endIndex: wrapOppIndex });
+				chunkStart = wrapOppIndex;
+				currentWidth -= wrapOppWidth;
+			} else if (chunkStart < charIndex) {
+				// No wrap opportunity: force-break at current position.
+				chunks.push({ text: line.slice(chunkStart, charIndex), startIndex: chunkStart, endIndex: charIndex });
+				chunkStart = charIndex;
 				currentWidth = 0;
-				chunkStartIndex = token.startIndex;
 			}
-
-			// Break the long token by grapheme
-			let tokenChunk = "";
-			let tokenChunkWidth = 0;
-			let tokenChunkStart = token.startIndex;
-			let tokenCharIndex = token.startIndex;
-
-			for (const seg of segmenter.segment(token.text)) {
-				const grapheme = seg.segment;
-				const graphemeWidth = visibleWidth(grapheme);
-
-				if (tokenChunkWidth + graphemeWidth > maxWidth && tokenChunk) {
-					chunks.push({
-						text: tokenChunk,
-						startIndex: tokenChunkStart,
-						endIndex: tokenCharIndex,
-					});
-					tokenChunk = grapheme;
-					tokenChunkWidth = graphemeWidth;
-					tokenChunkStart = tokenCharIndex;
-				} else {
-					tokenChunk += grapheme;
-					tokenChunkWidth += graphemeWidth;
-				}
-				tokenCharIndex += grapheme.length;
-			}
-
-			// Keep remainder as start of next chunk
-			if (tokenChunk) {
-				currentChunk = tokenChunk;
-				currentWidth = tokenChunkWidth;
-				chunkStartIndex = tokenChunkStart;
-			}
-			continue;
+			wrapOppIndex = -1;
 		}
 
-		// Check if adding this token would exceed width
-		if (currentWidth + tokenWidth > maxWidth) {
-			// Push current chunk (trimming trailing whitespace for display)
-			const trimmedChunk = currentChunk.trimEnd();
-			if (trimmedChunk || chunks.length === 0) {
-				chunks.push({
-					text: trimmedChunk,
-					startIndex: chunkStartIndex,
-					endIndex: chunkStartIndex + currentChunk.length,
-				});
-			}
+		// Advance.
+		currentWidth += gWidth;
 
-			// Start new line - skip leading whitespace
-			atLineStart = true;
-			if (token.isWhitespace) {
-				currentChunk = "";
-				currentWidth = 0;
-				chunkStartIndex = token.endIndex;
-			} else {
-				currentChunk = token.text;
-				currentWidth = tokenWidth;
-				chunkStartIndex = token.startIndex;
-				atLineStart = false;
-			}
-		} else {
-			// Add token to current chunk
-			currentChunk += token.text;
-			currentWidth += tokenWidth;
+		// Record wrap opportunity: whitespace followed by non-whitespace.
+		// Multiple spaces join (no break between them); the break point is
+		// after the last space before the next word.
+		const next = segments[i + 1];
+		if (isWs && next && !isWhitespaceChar(next.segment)) {
+			wrapOppIndex = next.index;
+			wrapOppWidth = currentWidth;
 		}
 	}
 
-	// Push final chunk
-	if (currentChunk) {
-		chunks.push({
-			text: currentChunk,
-			startIndex: chunkStartIndex,
-			endIndex: line.length,
-		});
-	}
+	// Push final chunk.
+	chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
 
-	return chunks.length > 0 ? chunks : [{ text: "", startIndex: 0, endIndex: 0 }];
+	return chunks;
 }
 
 // Kitty CSI-u sequences for printable keys, including optional shifted/base codepoints.
@@ -380,9 +282,6 @@ export class Editor implements Component, Focusable {
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	private setTextInternal(text: string): void {
-		// Reset kill ring state - external text changes break accumulation/yank chains
-		this.lastAction = null;
-
 		const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 		this.state.lines = lines.length === 0 ? [""] : lines;
 		this.state.cursorLine = this.state.lines.length - 1;
@@ -404,13 +303,17 @@ export class Editor implements Component, Focusable {
 		const paddingX = Math.min(this.paddingX, maxPadding);
 		const contentWidth = Math.max(1, width - paddingX * 2);
 
-		// Store width for cursor navigation
-		this.lastWidth = contentWidth;
+		// Layout width: with padding the cursor can overflow into it,
+		// without padding we reserve 1 column for the cursor.
+		const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
+
+		// Store for cursor navigation (must match wrapping width)
+		this.lastWidth = layoutWidth;
 
 		const horizontal = this.borderColor("─");
 
-		// Layout the text - use content width
-		const layoutLines = this.layoutText(contentWidth);
+		// Layout the text
+		const layoutLines = this.layoutText(layoutWidth);
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
@@ -454,6 +357,7 @@ export class Editor implements Component, Focusable {
 		for (const layoutLine of visibleLines) {
 			let displayText = layoutLine.text;
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
+			let cursorInPadding = false;
 
 			// Add cursor if this line has it
 			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
@@ -473,37 +377,23 @@ export class Editor implements Component, Focusable {
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
-					// Cursor is at the end - check if we have room for the space
-					if (lineVisibleWidth < contentWidth) {
-						// We have room - add highlighted space
-						const cursor = "\x1b[7m \x1b[0m";
-						displayText = before + marker + cursor;
-						// lineVisibleWidth increases by 1 - we're adding a space
-						lineVisibleWidth = lineVisibleWidth + 1;
-					} else {
-						// Line is at full width - use reverse video on last grapheme if possible
-						// or just show cursor at the end without adding space
-						const beforeGraphemes = [...segmenter.segment(before)];
-						if (beforeGraphemes.length > 0) {
-							const lastGrapheme = beforeGraphemes[beforeGraphemes.length - 1]?.segment || "";
-							const cursor = `\x1b[7m${lastGrapheme}\x1b[0m`;
-							// Rebuild 'before' without the last grapheme
-							const beforeWithoutLast = beforeGraphemes
-								.slice(0, -1)
-								.map((g) => g.segment)
-								.join("");
-							displayText = beforeWithoutLast + marker + cursor;
-						}
-						// lineVisibleWidth stays the same
+					// Cursor is at the end - add highlighted space
+					const cursor = "\x1b[7m \x1b[0m";
+					displayText = before + marker + cursor;
+					lineVisibleWidth = lineVisibleWidth + 1;
+					// If cursor overflows content width into the padding, flag it
+					if (lineVisibleWidth > contentWidth && paddingX > 0) {
+						cursorInPadding = true;
 					}
 				}
 			}
 
 			// Calculate padding based on actual visible width
 			const padding = " ".repeat(Math.max(0, contentWidth - lineVisibleWidth));
+			const lineRightPadding = cursorInPadding ? rightPadding.slice(1) : rightPadding;
 
 			// Render the line (no side borders, just horizontal lines above and below)
-			result.push(`${leftPadding}${displayText}${padding}${rightPadding}`);
+			result.push(`${leftPadding}${displayText}${padding}${lineRightPadding}`);
 		}
 
 		// Render bottom border (with scroll indicator if more content below)
@@ -912,13 +802,13 @@ export class Editor implements Component, Focusable {
 	}
 
 	setText(text: string): void {
+		this.lastAction = null;
 		this.historyIndex = -1; // Exit history browsing mode
 		// Push undo snapshot if content differs (makes programmatic changes undoable)
 		if (this.getText() !== text) {
 			this.pushUndoSnapshot();
 		}
 		this.setTextInternal(text);
-		this.lastAction = null;
 	}
 
 	/**
@@ -930,8 +820,55 @@ export class Editor implements Component, Focusable {
 		if (!text) return;
 		this.pushUndoSnapshot();
 		this.lastAction = null;
-		for (const char of text) {
-			this.insertCharacter(char, true);
+		this.historyIndex = -1;
+		this.insertTextAtCursorInternal(text);
+	}
+
+	/**
+	 * Internal text insertion at cursor. Handles single and multi-line text.
+	 * Does not push undo snapshots or trigger autocomplete - caller is responsible.
+	 * Normalizes line endings and calls onChange once at the end.
+	 */
+	private insertTextAtCursorInternal(text: string): void {
+		if (!text) return;
+
+		// Normalize line endings
+		const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+		const insertedLines = normalized.split("\n");
+
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
+		const afterCursor = currentLine.slice(this.state.cursorCol);
+
+		if (insertedLines.length === 1) {
+			// Single line - insert at cursor position
+			this.state.lines[this.state.cursorLine] = beforeCursor + normalized + afterCursor;
+			this.state.cursorCol += normalized.length;
+		} else {
+			// Multi-line insertion
+			this.state.lines = [
+				// All lines before current line
+				...this.state.lines.slice(0, this.state.cursorLine),
+
+				// The first inserted line merged with text before cursor
+				beforeCursor + insertedLines[0],
+
+				// All middle inserted lines
+				...insertedLines.slice(1, -1),
+
+				// The last inserted line with text after cursor
+				insertedLines[insertedLines.length - 1] + afterCursor,
+
+				// All lines after current line
+				...this.state.lines.slice(this.state.cursorLine + 1),
+			];
+
+			this.state.cursorLine += insertedLines.length - 1;
+			this.state.cursorCol = (insertedLines[insertedLines.length - 1] || "").length;
+		}
+
+		if (this.onChange) {
+			this.onChange(this.getText());
 		}
 	}
 
@@ -943,7 +880,7 @@ export class Editor implements Component, Focusable {
 		// - Consecutive word chars coalesce into one undo unit
 		// - Space captures state before itself (so undo removes space+following word together)
 		// - Each space is separately undoable
-		// Skip coalescing when called from atomic operations (paste, insertTextAtCursor)
+		// Skip coalescing when called from atomic operations (e.g., handlePaste)
 		if (!skipUndoCoalescing) {
 			if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
 				this.pushUndoSnapshot();
@@ -984,7 +921,7 @@ export class Editor implements Component, Focusable {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
-				if (textBeforeCursor.trimStart().startsWith("/")) {
+				if (this.isInSlashCommandContext(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 				// Check if we're in an @ file reference context
@@ -1025,7 +962,7 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
-		// Split into lines
+		// Split into lines to check for large paste
 		const pastedLines = filteredText.split("\n");
 
 		// Check if this is a large paste (> 10 lines or > 1000 characters)
@@ -1041,61 +978,20 @@ export class Editor implements Component, Focusable {
 				pastedLines.length > 10
 					? `[paste #${pasteId} +${pastedLines.length} lines]`
 					: `[paste #${pasteId} ${totalChars} chars]`;
-			for (const char of marker) {
-				this.insertCharacter(char, true);
-			}
+			this.insertTextAtCursorInternal(marker);
 			return;
 		}
 
 		if (pastedLines.length === 1) {
-			// Single line - just insert each character
-			const text = pastedLines[0] || "";
-			for (const char of text) {
+			// Single line - insert character by character to trigger autocomplete
+			for (const char of filteredText) {
 				this.insertCharacter(char, true);
 			}
 			return;
 		}
 
-		// Multi-line paste - be very careful with array manipulation
-		const currentLine = this.state.lines[this.state.cursorLine] || "";
-		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-		const afterCursor = currentLine.slice(this.state.cursorCol);
-
-		// Build the new lines array step by step
-		const newLines: string[] = [];
-
-		// Add all lines before current line
-		for (let i = 0; i < this.state.cursorLine; i++) {
-			newLines.push(this.state.lines[i] || "");
-		}
-
-		// Add the first pasted line merged with before cursor text
-		newLines.push(beforeCursor + (pastedLines[0] || ""));
-
-		// Add all middle pasted lines
-		for (let i = 1; i < pastedLines.length - 1; i++) {
-			newLines.push(pastedLines[i] || "");
-		}
-
-		// Add the last pasted line with after cursor text
-		newLines.push((pastedLines[pastedLines.length - 1] || "") + afterCursor);
-
-		// Add all lines after current line
-		for (let i = this.state.cursorLine + 1; i < this.state.lines.length; i++) {
-			newLines.push(this.state.lines[i] || "");
-		}
-
-		// Replace the entire lines array
-		this.state.lines = newLines;
-
-		// Update cursor position to end of pasted content
-		this.state.cursorLine += pastedLines.length - 1;
-		this.state.cursorCol = (pastedLines[pastedLines.length - 1] || "").length;
-
-		// Notify of change
-		if (this.onChange) {
-			this.onChange(this.getText());
-		}
+		// Multi-line paste - use direct state manipulation
+		this.insertTextAtCursorInternal(filteredText);
 	}
 
 	private addNewLine(): void {
@@ -1169,7 +1065,7 @@ export class Editor implements Component, Focusable {
 			const currentLine = this.state.lines[this.state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 			// Slash command context
-			if (textBeforeCursor.trimStart().startsWith("/")) {
+			if (this.isInSlashCommandContext(textBeforeCursor)) {
 				this.tryTriggerAutocomplete();
 			}
 			// @ file reference context
@@ -1388,7 +1284,7 @@ export class Editor implements Component, Focusable {
 			const currentLine = this.state.lines[this.state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 			// Slash command context
-			if (textBeforeCursor.trimStart().startsWith("/")) {
+			if (this.isInSlashCommandContext(textBeforeCursor)) {
 				this.tryTriggerAutocomplete();
 			}
 			// @ file reference context
@@ -1802,13 +1698,25 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
+	// Slash menu only allowed when all other lines are empty (no mixed content)
+	private isSlashMenuAllowed(): boolean {
+		for (let i = 0; i < this.state.lines.length; i++) {
+			if (i === this.state.cursorLine) continue;
+			if (this.state.lines[i].trim() !== "") return false;
+		}
+		return true;
+	}
+
 	// Helper method to check if cursor is at start of message (for slash command detection)
 	private isAtStartOfMessage(): boolean {
+		if (!this.isSlashMenuAllowed()) return false;
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-
-		// At start if line is empty, only contains whitespace, or is just "/"
 		return beforeCursor.trim() === "" || beforeCursor.trim() === "/";
+	}
+
+	private isInSlashCommandContext(textBeforeCursor: string): boolean {
+		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
 	}
 
 	// Autocomplete methods
@@ -1848,7 +1756,7 @@ export class Editor implements Component, Focusable {
 		const beforeCursor = currentLine.slice(0, this.state.cursorCol);
 
 		// Check if we're in a slash command context
-		if (beforeCursor.trimStart().startsWith("/") && !beforeCursor.trimStart().includes(" ")) {
+		if (this.isInSlashCommandContext(beforeCursor) && !beforeCursor.trimStart().includes(" ")) {
 			this.handleSlashCommandCompletion();
 		} else {
 			this.forceFileAutocomplete();

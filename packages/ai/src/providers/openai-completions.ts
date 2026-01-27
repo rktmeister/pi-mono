@@ -8,14 +8,15 @@ import type {
 	ChatCompletionMessageParam,
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
-import { calculateCost } from "../models.js";
-import { getEnvApiKey } from "../stream.js";
+import { getEnvApiKey } from "../env-api-keys.js";
+import { calculateCost, supportsXhigh } from "../models.js";
 import type {
 	AssistantMessage,
 	Context,
 	Message,
 	Model,
 	OpenAICompletionsCompat,
+	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
 	StreamOptions,
@@ -23,10 +24,12 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	ToolResultMessage,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
 /**
@@ -71,7 +74,7 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
 }
 
-export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
+export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
 	options?: OpenAICompletionsOptions,
@@ -99,7 +102,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = createClient(model, context, apiKey);
+			const client = createClient(model, context, apiKey, options?.headers);
 			const params = buildParams(model, context, options);
 			options?.onPayload?.(params);
 			const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
@@ -298,7 +301,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			}
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unkown error ocurred");
+				throw new Error("An unknown error occurred");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -318,7 +321,31 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 	return stream;
 };
 
-function createClient(model: Model<"openai-completions">, context: Context, apiKey?: string) {
+export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions", SimpleStreamOptions> = (
+	model: Model<"openai-completions">,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream => {
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	if (!apiKey) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
+
+	const base = buildBaseOptions(model, options, apiKey);
+	const reasoningEffort = supportsXhigh(model) ? options?.reasoning : clampReasoning(options?.reasoning);
+
+	return streamOpenAICompletions(model, context, {
+		...base,
+		reasoningEffort,
+	} satisfies OpenAICompletionsOptions);
+};
+
+function createClient(
+	model: Model<"openai-completions">,
+	context: Context,
+	apiKey?: string,
+	optionsHeaders?: Record<string, string>,
+) {
 	if (!apiKey) {
 		if (!process.env.OPENAI_API_KEY) {
 			throw new Error(
@@ -352,6 +379,11 @@ function createClient(model: Model<"openai-completions">, context: Context, apiK
 		if (hasImages) {
 			headers["Copilot-Vision-Request"] = "true";
 		}
+	}
+
+	// Merge options headers last so they can override defaults
+	if (optionsHeaders) {
+		Object.assign(headers, optionsHeaders);
 	}
 
 	return new OpenAI({
@@ -413,6 +445,11 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		params.reasoning_effort = options.reasoningEffort;
 	}
 
+	// OpenRouter provider routing preferences
+	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
+		(params as any).provider = model.compat.openRouterRouting;
+	}
+
 	return params;
 }
 
@@ -449,7 +486,7 @@ function maybeAddOpenRouterAnthropicCacheControl(
 	}
 }
 
-function convertMessages(
+export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: Required<OpenAICompletionsCompat>,
@@ -476,7 +513,8 @@ function convertMessages(
 
 	let lastRole: string | null = null;
 
-	for (const msg of transformedMessages) {
+	for (let i = 0; i < transformedMessages.length; i++) {
+		const msg = transformedMessages[i];
 		// Some providers (e.g. Mistral/Devstral) don't allow user messages directly after tool results
 		// Insert a synthetic assistant message to bridge the gap
 		if (compat.requiresAssistantAfterToolResult && lastRole === "toolResult" && msg.role === "user") {
@@ -600,55 +638,71 @@ function convertMessages(
 			}
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
-			// Extract text and image content
-			const textResult = msg.content
-				.filter((c) => c.type === "text")
-				.map((c) => (c as any).text)
-				.join("\n");
-			const hasImages = msg.content.some((c) => c.type === "image");
+			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			let j = i;
 
-			// Always send tool result with text (or placeholder if only images)
-			const hasText = textResult.length > 0;
-			// Some providers (e.g. Mistral) require the 'name' field in tool results
-			const toolResultMsg: ChatCompletionToolMessageParam = {
-				role: "tool",
-				content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
-				tool_call_id: msg.toolCallId,
-			};
-			if (compat.requiresToolResultName && msg.toolName) {
-				(toolResultMsg as any).name = msg.toolName;
-			}
-			params.push(toolResultMsg);
+			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
+				const toolMsg = transformedMessages[j] as ToolResultMessage;
 
-			// If there are images and model supports them, send a follow-up user message with images
-			if (hasImages && model.input.includes("image")) {
-				const contentBlocks: Array<
-					{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }
-				> = [];
+				// Extract text and image content
+				const textResult = toolMsg.content
+					.filter((c) => c.type === "text")
+					.map((c) => (c as any).text)
+					.join("\n");
+				const hasImages = toolMsg.content.some((c) => c.type === "image");
 
-				// Add text prefix
-				contentBlocks.push({
-					type: "text",
-					text: "Attached image(s) from tool result:",
-				});
+				// Always send tool result with text (or placeholder if only images)
+				const hasText = textResult.length > 0;
+				// Some providers (e.g. Mistral) require the 'name' field in tool results
+				const toolResultMsg: ChatCompletionToolMessageParam = {
+					role: "tool",
+					content: sanitizeSurrogates(hasText ? textResult : "(see attached image)"),
+					tool_call_id: toolMsg.toolCallId,
+				};
+				if (compat.requiresToolResultName && toolMsg.toolName) {
+					(toolResultMsg as any).name = toolMsg.toolName;
+				}
+				params.push(toolResultMsg);
 
-				// Add images
-				for (const block of msg.content) {
-					if (block.type === "image") {
-						contentBlocks.push({
-							type: "image_url",
-							image_url: {
-								url: `data:${(block as any).mimeType};base64,${(block as any).data}`,
-							},
-						});
+				if (hasImages && model.input.includes("image")) {
+					for (const block of toolMsg.content) {
+						if (block.type === "image") {
+							imageBlocks.push({
+								type: "image_url",
+								image_url: {
+									url: `data:${(block as any).mimeType};base64,${(block as any).data}`,
+								},
+							});
+						}
 					}
+				}
+			}
+
+			i = j - 1;
+
+			if (imageBlocks.length > 0) {
+				if (compat.requiresAssistantAfterToolResult) {
+					params.push({
+						role: "assistant",
+						content: "I have processed the tool results.",
+					});
 				}
 
 				params.push({
 					role: "user",
-					content: contentBlocks,
+					content: [
+						{
+							type: "text",
+							text: "Attached image(s) from tool result:",
+						},
+						...imageBlocks,
+					],
 				});
+				lastRole = "user";
+			} else {
+				lastRole = "toolResult";
 			}
+			continue;
 		}
 
 		lastRole = msg.role;
@@ -728,6 +782,7 @@ function detectCompat(model: Model<"openai-completions">): Required<OpenAIComple
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
 		thinkingFormat: isZai ? "zai" : "openai",
+		openRouterRouting: {},
 	};
 }
 
@@ -751,5 +806,6 @@ function getCompat(model: Model<"openai-completions">): Required<OpenAICompletio
 		requiresThinkingAsText: model.compat.requiresThinkingAsText ?? detected.requiresThinkingAsText,
 		requiresMistralToolIds: model.compat.requiresMistralToolIds ?? detected.requiresMistralToolIds,
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
+		openRouterRouting: model.compat.openRouterRouting ?? {},
 	};
 }

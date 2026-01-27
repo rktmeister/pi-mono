@@ -482,8 +482,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		// - null/undefined/@ai-sdk/openai-compatible → openai-completions
 		if (data.opencode?.models) {
 			for (const [modelId, model] of Object.entries(data.opencode.models)) {
-				const m = model as ModelsDevModel;
+				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
+				if (m.status === "deprecated") continue;
 
 				const npm = m.provider?.npm;
 				let api: Api;
@@ -1100,6 +1101,16 @@ async function generateModels() {
 	];
 	allModels.push(...vertexModels);
 
+	const azureOpenAiModels: Model<Api>[] = allModels
+		.filter((model) => model.provider === "openai" && model.api === "openai-responses")
+		.map((model) => ({
+			...model,
+			api: "azure-openai-responses",
+			provider: "azure-openai-responses",
+			baseUrl: "",
+		}));
+	allModels.push(...azureOpenAiModels);
+
 	// Group by provider and deduplicate by model ID
 	const providers: Record<string, Record<string, Model<any>>> = {};
 	for (const model of allModels) {
@@ -1136,7 +1147,7 @@ export const MODELS = {
 			output += `\t\t\tname: "${model.name}",\n`;
 			output += `\t\t\tapi: "${model.api}",\n`;
 			output += `\t\t\tprovider: "${model.provider}",\n`;
-			if (model.baseUrl) {
+			if (model.baseUrl !== undefined) {
 				output += `\t\t\tbaseUrl: "${model.baseUrl}",\n`;
 			}
 			if (model.headers) {

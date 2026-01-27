@@ -2,7 +2,11 @@ import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
-import type { Api, Context, Model, OptionsForApi, ToolResultMessage } from "../src/types.js";
+import type { Api, Context, Model, StreamOptions, ToolResultMessage } from "../src/types.js";
+
+type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
+
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
@@ -30,7 +34,7 @@ const [anthropicOAuthToken, githubCopilotToken, geminiCliToken, antigravityToken
  * "The request body is not valid JSON: no low surrogate in string: line 1 column 197667"
  */
 
-async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const toolCallId = llm.provider === "mistral" ? "testtool1" : "test_1";
 	// Simulate a tool that returns emoji
 	const context: Context = {
@@ -117,7 +121,7 @@ async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, option
 	expect(response.content.length).toBeGreaterThan(0);
 }
 
-async function testRealWorldLinkedInData<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testRealWorldLinkedInData<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const toolCallId = llm.provider === "mistral" ? "linkedin1" : "linkedin_1";
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant.",
@@ -206,7 +210,7 @@ Unanswered Comments: 2
 	expect(response.content.some((b) => b.type === "text")).toBe(true);
 }
 
-async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, options: OptionsForApi<TApi> = {}) {
+async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const toolCallId = llm.provider === "mistral" ? "testtool2" : "test_2";
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant.",
@@ -326,6 +330,24 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 
 		it("should handle unpaired high surrogate (0xD83D) in tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testUnpairedHighSurrogate(llm);
+		});
+	});
+
+	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider Unicode Handling", () => {
+		const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+		const azureDeploymentName = resolveAzureDeploymentName(llm.id);
+		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
+
+		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testEmojiInToolResults(llm, azureOptions);
+		});
+
+		it("should handle real-world LinkedIn comment data with emoji", { retry: 3, timeout: 30000 }, async () => {
+			await testRealWorldLinkedInData(llm, azureOptions);
+		});
+
+		it("should handle unpaired high surrogate (0xD83D) in tool results", { retry: 3, timeout: 30000 }, async () => {
+			await testUnpairedHighSurrogate(llm, azureOptions);
 		});
 	});
 

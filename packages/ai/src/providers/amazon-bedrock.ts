@@ -1,5 +1,6 @@
 import {
 	BedrockRuntimeClient,
+	type BedrockRuntimeClientConfig,
 	StopReason as BedrockStopReason,
 	type Tool as BedrockTool,
 	CachePointType,
@@ -24,6 +25,7 @@ import type {
 	AssistantMessage,
 	Context,
 	Model,
+	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
 	StreamOptions,
@@ -38,6 +40,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
 export interface BedrockOptions extends StreamOptions {
@@ -54,10 +57,10 @@ export interface BedrockOptions extends StreamOptions {
 
 type Block = (TextContent | ThinkingContent | ToolCall) & { index?: number; partialJson?: string };
 
-export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
+export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> = (
 	model: Model<"bedrock-converse-stream">,
 	context: Context,
-	options: BedrockOptions,
+	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 
@@ -82,11 +85,42 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 		const blocks = output.content as Block[];
 
+		const config: BedrockRuntimeClientConfig = {
+			region: options.region,
+			profile: options.profile,
+		};
+
+		// in Node.js/Bun environment only
+		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
+			config.region = config.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+
+			if (
+				process.env.HTTP_PROXY ||
+				process.env.HTTPS_PROXY ||
+				process.env.NO_PROXY ||
+				process.env.http_proxy ||
+				process.env.https_proxy ||
+				process.env.no_proxy
+			) {
+				const nodeHttpHandler = await import("@smithy/node-http-handler");
+				const proxyAgent = await import("proxy-agent");
+
+				const agent = new proxyAgent.ProxyAgent();
+
+				// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
+				// on `http2` module and has no support for http agent.
+				// Use NodeHttpHandler to support http agent.
+				config.requestHandler = new nodeHttpHandler.NodeHttpHandler({
+					httpAgent: agent,
+					httpsAgent: agent,
+				});
+			}
+		}
+
+		config.region = config.region || "us-east-1";
+
 		try {
-			const client = new BedrockRuntimeClient({
-				region: options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1",
-				profile: options.profile,
-			});
+			const client = new BedrockRuntimeClient(config);
 
 			const commandInput = {
 				modelId: model.id,
@@ -153,6 +187,42 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	})();
 
 	return stream;
+};
+
+export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", SimpleStreamOptions> = (
+	model: Model<"bedrock-converse-stream">,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream => {
+	const base = buildBaseOptions(model, options, undefined);
+	if (!options?.reasoning) {
+		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
+	}
+
+	if (model.id.includes("anthropic.claude") || model.id.includes("anthropic/claude")) {
+		const adjusted = adjustMaxTokensForThinking(
+			base.maxTokens || 0,
+			model.maxTokens,
+			options.reasoning,
+			options.thinkingBudgets,
+		);
+
+		return streamBedrock(model, context, {
+			...base,
+			maxTokens: adjusted.maxTokens,
+			reasoning: options.reasoning,
+			thinkingBudgets: {
+				...(options.thinkingBudgets || {}),
+				[clampReasoning(options.reasoning)!]: adjusted.thinkingBudget,
+			},
+		} satisfies BedrockOptions);
+	}
+
+	return streamBedrock(model, context, {
+		...base,
+		reasoning: options.reasoning,
+		thinkingBudgets: options.thinkingBudgets,
+	} satisfies BedrockOptions);
 };
 
 function handleContentBlockStart(

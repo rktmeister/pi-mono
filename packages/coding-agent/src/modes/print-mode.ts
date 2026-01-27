@@ -35,100 +35,35 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			console.log(JSON.stringify(header));
 		}
 	}
-	// Set up extensions for print mode (no UI, no command context)
-	const extensionRunner = session.extensionRunner;
-	if (extensionRunner) {
-		extensionRunner.initialize(
-			// ExtensionActions
-			{
-				sendMessage: (message, options) => {
-					session.sendCustomMessage(message, options).catch((e) => {
-						console.error(`Extension sendMessage failed: ${e instanceof Error ? e.message : String(e)}`);
-					});
-				},
-				sendUserMessage: (content, options) => {
-					session.sendUserMessage(content, options).catch((e) => {
-						console.error(`Extension sendUserMessage failed: ${e instanceof Error ? e.message : String(e)}`);
-					});
-				},
-				appendEntry: (customType, data) => {
-					session.sessionManager.appendCustomEntry(customType, data);
-				},
-				setSessionName: (name) => {
-					session.sessionManager.appendSessionInfo(name);
-				},
-				getSessionName: () => {
-					return session.sessionManager.getSessionName();
-				},
-				setLabel: (entryId, label) => {
-					session.sessionManager.appendLabelChange(entryId, label);
-				},
-				getActiveTools: () => session.getActiveToolNames(),
-				getAllTools: () => session.getAllTools(),
-				setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),
-				setModel: async (model) => {
-					const key = await session.modelRegistry.getApiKey(model);
-					if (!key) return false;
-					await session.setModel(model);
-					return true;
-				},
-				getThinkingLevel: () => session.thinkingLevel,
-				setThinkingLevel: (level) => session.setThinkingLevel(level),
+	// Set up extensions for print mode (no UI)
+	await session.bindExtensions({
+		commandContextActions: {
+			waitForIdle: () => session.agent.waitForIdle(),
+			newSession: async (options) => {
+				const success = await session.newSession({ parentSession: options?.parentSession });
+				if (success && options?.setup) {
+					await options.setup(session.sessionManager);
+				}
+				return { cancelled: !success };
 			},
-			// ExtensionContextActions
-			{
-				getModel: () => session.model,
-				isIdle: () => !session.isStreaming,
-				abort: () => session.abort(),
-				hasPendingMessages: () => session.pendingMessageCount > 0,
-				shutdown: () => {},
-				getContextUsage: () => session.getContextUsage(),
-				compact: (options) => {
-					void (async () => {
-						try {
-							const result = await session.compact(options?.customInstructions);
-							options?.onComplete?.(result);
-						} catch (error) {
-							const err = error instanceof Error ? error : new Error(String(error));
-							options?.onError?.(err);
-						}
-					})();
-				},
+			fork: async (entryId) => {
+				const result = await session.fork(entryId);
+				return { cancelled: result.cancelled };
 			},
-			// ExtensionCommandContextActions - commands invokable via prompt("/command")
-			{
-				waitForIdle: () => session.agent.waitForIdle(),
-				newSession: async (options) => {
-					const success = await session.newSession({ parentSession: options?.parentSession });
-					if (success && options?.setup) {
-						await options.setup(session.sessionManager);
-					}
-					return { cancelled: !success };
-				},
-				fork: async (entryId) => {
-					const result = await session.fork(entryId);
-					return { cancelled: result.cancelled };
-				},
-				navigateTree: async (targetId, options) => {
-					const result = await session.navigateTree(targetId, {
-						summarize: options?.summarize,
-						customInstructions: options?.customInstructions,
-						replaceInstructions: options?.replaceInstructions,
-						label: options?.label,
-					});
-					return { cancelled: result.cancelled };
-				},
+			navigateTree: async (targetId, options) => {
+				const result = await session.navigateTree(targetId, {
+					summarize: options?.summarize,
+					customInstructions: options?.customInstructions,
+					replaceInstructions: options?.replaceInstructions,
+					label: options?.label,
+				});
+				return { cancelled: result.cancelled };
 			},
-			// No UI context - hasUI will be false
-		);
-		extensionRunner.onError((err) => {
+		},
+		onError: (err) => {
 			console.error(`Extension error (${err.extensionPath}): ${err.error}`);
-		});
-		// Emit session_start event
-		await extensionRunner.emit({
-			type: "session_start",
-		});
-	}
+		},
+	});
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe((event) => {

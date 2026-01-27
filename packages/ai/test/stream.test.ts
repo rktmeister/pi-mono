@@ -6,8 +6,12 @@ import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete, stream } from "../src/stream.js";
-import type { Api, Context, ImageContent, Model, OptionsForApi, Tool, ToolResultMessage } from "../src/types.js";
+import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResultMessage } from "../src/types.js";
+
+type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
+
 import { StringEnum } from "../src/utils/typebox-helpers.js";
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
@@ -41,7 +45,7 @@ const calculatorTool: Tool<typeof calculatorSchema> = {
 	parameters: calculatorSchema,
 };
 
-async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant. Be concise.",
 		messages: [{ role: "user", content: "Reply with exactly: 'Hello test successful'", timestamp: Date.now() }],
@@ -70,7 +74,7 @@ async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options
 	);
 }
 
-async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that uses tools when asked.",
 		messages: [
@@ -148,7 +152,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: Op
 	}
 }
 
-async function handleStreaming<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function handleStreaming<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	let textStarted = false;
 	let textChunks = "";
 	let textCompleted = false;
@@ -178,7 +182,7 @@ async function handleStreaming<TApi extends Api>(model: Model<TApi>, options?: O
 	expect(response.content.some((b) => b.type === "text")).toBeTruthy();
 }
 
-async function handleThinking<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function handleThinking<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	let thinkingStarted = false;
 	let thinkingChunks = "";
 	let thinkingCompleted = false;
@@ -215,7 +219,7 @@ async function handleThinking<TApi extends Api>(model: Model<TApi>, options?: Op
 	expect(response.content.some((b) => b.type === "thinking")).toBeTruthy();
 }
 
-async function handleImage<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function handleImage<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	// Check if the model supports images
 	if (!model.input.includes("image")) {
 		console.log(`Skipping image test - model ${model.id} doesn't support images`);
@@ -262,7 +266,7 @@ async function handleImage<TApi extends Api>(model: Model<TApi>, options?: Optio
 	}
 }
 
-async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: OptionsForApi<TApi>) {
+async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamOptionsWithExtras) {
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant that can use tools to answer questions.",
 		messages: [
@@ -503,6 +507,28 @@ describe("Generate E2E Tests", () => {
 
 		it("should handle image input", { retry: 3 }, async () => {
 			await handleImage(model);
+		});
+	});
+
+	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider (gpt-4o-mini)", () => {
+		const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+		const azureDeploymentName = resolveAzureDeploymentName(llm.id);
+		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
+
+		it("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, azureOptions);
+		});
+
+		it("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, azureOptions);
+		});
+
+		it("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, azureOptions);
+		});
+
+		it("should handle image input", { retry: 3 }, async () => {
+			await handleImage(llm, azureOptions);
 		});
 	});
 

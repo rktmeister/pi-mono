@@ -14,6 +14,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -23,10 +24,11 @@ import type {
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
-import { getAuthPath } from "../config.js";
+import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
+import { sleep } from "../utils/sleep.js";
 import { type BashResult, executeBash as executeBashCommand, executeBashWithOperations } from "./bash-executor.js";
 import {
 	type CompactionResult,
@@ -40,25 +42,61 @@ import {
 } from "./compaction/index.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.js";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.js";
-import type {
-	ContextUsage,
+import {
+	type ContextUsage,
+	type ExtensionCommandContextActions,
+	type ExtensionErrorListener,
 	ExtensionRunner,
-	InputSource,
-	SessionBeforeCompactResult,
-	SessionBeforeForkResult,
-	SessionBeforeSwitchResult,
-	SessionBeforeTreeResult,
-	TreePreparation,
-	TurnEndEvent,
-	TurnStartEvent,
+	type ExtensionUIContext,
+	type InputSource,
+	type SessionBeforeCompactResult,
+	type SessionBeforeForkResult,
+	type SessionBeforeSwitchResult,
+	type SessionBeforeTreeResult,
+	type ShutdownHandler,
+	type ToolDefinition,
+	type TreePreparation,
+	type TurnEndEvent,
+	type TurnStartEvent,
+	wrapRegisteredTools,
+	wrapToolsWithExtensions,
 } from "./extensions/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager.js";
-import type { SettingsManager, SkillsSettings } from "./settings-manager.js";
-import type { Skill, SkillWarning } from "./skills.js";
+import type { ResourceLoader } from "./resource-loader.js";
+import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
+import type { SettingsManager } from "./settings-manager.js";
+import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
+import { createAllTools } from "./tools/index.js";
+
+// ============================================================================
+// Skill Block Parsing
+// ============================================================================
+
+/** Parsed skill block from a user message */
+export interface ParsedSkillBlock {
+	name: string;
+	location: string;
+	content: string;
+	userMessage: string | undefined;
+}
+
+/**
+ * Parse a skill block from message text.
+ * Returns null if the text doesn't contain a skill block.
+ */
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
+	if (!match) return null;
+	return {
+		name: match[1],
+		location: match[2],
+		content: match[3],
+		userMessage: match[4]?.trim() || undefined,
+	};
+}
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -85,23 +123,28 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
+	cwd: string;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel: ThinkingLevel }>;
-	/** File-based prompt templates for expansion */
-	promptTemplates?: PromptTemplate[];
-	/** Extension runner (created in sdk.ts with wrapped tools) */
-	extensionRunner?: ExtensionRunner;
-	/** Loaded skills (already discovered by SDK) */
-	skills?: Skill[];
-	/** Skill loading warnings (already captured by SDK) */
-	skillWarnings?: SkillWarning[];
-	skillsSettings?: Required<SkillsSettings>;
+	/** Resource loader for skills, prompts, themes, context files, system prompt */
+	resourceLoader: ResourceLoader;
+	/** SDK custom tools registered outside extensions */
+	customTools?: ToolDefinition[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
-	/** Tool registry for extension getTools/setTools - maps name to tool */
-	toolRegistry?: Map<string, AgentTool>;
-	/** Function to rebuild system prompt when tools change */
-	rebuildSystemPrompt?: (toolNames: string[]) => string;
+	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	initialActiveToolNames?: string[];
+	/** Override base tools (useful for custom runtimes). */
+	baseToolsOverride?: Record<string, AgentTool>;
+	/** Mutable ref used by Agent to access the current ExtensionRunner */
+	extensionRunnerRef?: { current?: ExtensionRunner };
+}
+
+export interface ExtensionBindings {
+	uiContext?: ExtensionUIContext;
+	commandContextActions?: ExtensionCommandContextActions;
+	shutdownHandler?: ShutdownHandler;
+	onError?: ExtensionErrorListener;
 }
 
 /** Options for AgentSession.prompt() */
@@ -163,7 +206,6 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel: ThinkingLevel }>;
-	private _promptTemplates: PromptTemplate[];
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -197,40 +239,49 @@ export class AgentSession {
 	private _extensionRunner: ExtensionRunner | undefined = undefined;
 	private _turnIndex = 0;
 
-	private _skills: Skill[];
-	private _skillWarnings: SkillWarning[];
-	private _skillsSettings: Required<SkillsSettings> | undefined;
+	private _resourceLoader: ResourceLoader;
+	private _customTools: ToolDefinition[];
+	private _baseToolRegistry: Map<string, AgentTool> = new Map();
+	private _cwd: string;
+	private _extensionRunnerRef?: { current?: ExtensionRunner };
+	private _initialActiveToolNames?: string[];
+	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _extensionUIContext?: ExtensionUIContext;
+	private _extensionCommandContextActions?: ExtensionCommandContextActions;
+	private _extensionShutdownHandler?: ShutdownHandler;
+	private _extensionErrorListener?: ExtensionErrorListener;
+	private _extensionErrorUnsubscriber?: () => void;
 
 	// Model registry for API key resolution
 	private _modelRegistry: ModelRegistry;
 
 	// Tool registry for extension getTools/setTools
-	private _toolRegistry: Map<string, AgentTool>;
-
-	// Function to rebuild system prompt when tools change
-	private _rebuildSystemPrompt?: (toolNames: string[]) => string;
+	private _toolRegistry: Map<string, AgentTool> = new Map();
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
-	private _baseSystemPrompt: string;
+	private _baseSystemPrompt = "";
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
-		this._promptTemplates = config.promptTemplates ?? [];
-		this._extensionRunner = config.extensionRunner;
-		this._skills = config.skills ?? [];
-		this._skillWarnings = config.skillWarnings ?? [];
-		this._skillsSettings = config.skillsSettings;
+		this._resourceLoader = config.resourceLoader;
+		this._customTools = config.customTools ?? [];
+		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
-		this._toolRegistry = config.toolRegistry ?? new Map();
-		this._rebuildSystemPrompt = config.rebuildSystemPrompt;
-		this._baseSystemPrompt = config.agent.state.systemPrompt;
+		this._extensionRunnerRef = config.extensionRunnerRef;
+		this._initialActiveToolNames = config.initialActiveToolNames;
+		this._baseToolsOverride = config.baseToolsOverride;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+
+		this._buildRuntime({
+			activeToolNames: this._initialActiveToolNames,
+			includeAllExtensionTools: true,
+		});
 	}
 
 	/** Model registry for API key resolution and model discovery */
@@ -502,10 +553,8 @@ export class AgentSession {
 		this.agent.setTools(tools);
 
 		// Rebuild base system prompt with new tool set
-		if (this._rebuildSystemPrompt) {
-			this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
-			this.agent.setSystemPrompt(this._baseSystemPrompt);
-		}
+		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+		this.agent.setSystemPrompt(this._baseSystemPrompt);
 	}
 
 	/** Whether auto-compaction is currently running */
@@ -550,7 +599,26 @@ export class AgentSession {
 
 	/** File-based prompt templates */
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
-		return this._promptTemplates;
+		return this._resourceLoader.getPrompts().prompts;
+	}
+
+	private _rebuildSystemPrompt(toolNames: string[]): string {
+		const validToolNames = toolNames.filter((name) => this._baseToolRegistry.has(name));
+		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
+		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
+		const appendSystemPrompt =
+			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const loadedSkills = this._resourceLoader.getSkills().skills;
+		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
+
+		return buildSystemPrompt({
+			cwd: this._cwd,
+			skills: loadedSkills,
+			contextFiles: loadedContextFiles,
+			customPrompt: loaderSystemPrompt,
+			appendSystemPrompt,
+			selectedTools: validToolNames,
+		});
 	}
 
 	// =========================================================================
@@ -601,7 +669,7 @@ export class AgentSession {
 		let expandedText = currentText;
 		if (expandPromptTemplates) {
 			expandedText = this._expandSkillCommand(expandedText);
-			expandedText = expandPromptTemplate(expandedText, [...this._promptTemplates]);
+			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 
 		// If streaming, queue via steer() or followUp() based on option
@@ -626,7 +694,7 @@ export class AgentSession {
 		if (!this.model) {
 			throw new Error(
 				"No model selected.\n\n" +
-					`Use /login, set an API key environment variable, or create ${getAuthPath()}\n\n` +
+					`Use /login or set an API key environment variable. See ${join(getDocsPath(), "authentication.md")}\n\n` +
 					"Then use /model to select a model.",
 			);
 		}
@@ -634,9 +702,17 @@ export class AgentSession {
 		// Validate API key
 		const apiKey = await this._modelRegistry.getApiKey(this.model);
 		if (!apiKey) {
+			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+			if (isOAuth) {
+				throw new Error(
+					`Authentication failed for "${this.model.provider}". ` +
+						`Credentials may have expired or network is unavailable. ` +
+						`Run '/login ${this.model.provider}' to re-authenticate.`,
+				);
+			}
 			throw new Error(
 				`No API key found for ${this.model.provider}.\n\n` +
-					`Use /login, set an API key environment variable, or create ${getAuthPath()}`,
+					`Use /login or set an API key environment variable. See ${join(getDocsPath(), "authentication.md")}`,
 			);
 		}
 
@@ -742,15 +818,14 @@ export class AgentSession {
 		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		const skill = this._skills.find((s) => s.name === skillName);
+		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
-			const header = `Skill location: ${skill.filePath}\nReferences are relative to ${skill.baseDir}.`;
-			const skillMessage = `${header}\n\n${body}`;
-			return args ? `${skillMessage}\n\n---\n\nUser: ${args}` : skillMessage;
+			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+			return args ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
 			// Emit error like extension commands do
 			this._extensionRunner?.emitError({
@@ -776,7 +851,7 @@ export class AgentSession {
 
 		// Expand skill commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this._promptTemplates]);
+		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueSteer(expandedText);
 	}
@@ -795,7 +870,7 @@ export class AgentSession {
 
 		// Expand skill commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
-		expandedText = expandPromptTemplate(expandedText, [...this._promptTemplates]);
+		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueFollowUp(expandedText);
 	}
@@ -883,6 +958,8 @@ export class AgentSession {
 				message.display,
 				message.details,
 			);
+			this._emit({ type: "message_start", message: appMessage });
+			this._emit({ type: "message_end", message: appMessage });
 		}
 	}
 
@@ -955,18 +1032,8 @@ export class AgentSession {
 		return this._followUpMessages;
 	}
 
-	get skillsSettings(): Required<SkillsSettings> | undefined {
-		return this._skillsSettings;
-	}
-
-	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
-	get skills(): readonly Skill[] {
-		return this._skills;
-	}
-
-	/** Skill loading warnings captured by SDK */
-	get skillWarnings(): readonly SkillWarning[] {
-		return this._skillWarnings;
+	get resourceLoader(): ResourceLoader {
+		return this._resourceLoader;
 	}
 
 	/**
@@ -982,10 +1049,14 @@ export class AgentSession {
 	 * Start a new session, optionally with initial messages and parent tracking.
 	 * Clears all messages and starts a new session.
 	 * Listeners are preserved and will continue receiving events.
-	 * @param options - Optional initial messages and parent session path
+	 * @param options.parentSession - Optional parent session path for tracking
+	 * @param options.setup - Optional callback to initialize session (e.g., append messages)
 	 * @returns true if completed, false if cancelled by extension
 	 */
-	async newSession(options?: NewSessionOptions): Promise<boolean> {
+	async newSession(options?: {
+		parentSession?: string;
+		setup?: (sessionManager: SessionManager) => Promise<void>;
+	}): Promise<boolean> {
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -1003,11 +1074,20 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		await this.abort();
 		this.agent.reset();
-		this.sessionManager.newSession(options);
+		this.sessionManager.newSession({ parentSession: options?.parentSession });
 		this.agent.sessionId = this.sessionManager.getSessionId();
 		this._steeringMessages = [];
 		this._followUpMessages = [];
 		this._pendingNextTurnMessages = [];
+
+		// Run setup callback if provided (e.g., to append initial messages)
+		if (options?.setup) {
+			await options.setup(this.sessionManager);
+			// Sync agent state with session manager after setup
+			const sessionContext = this.sessionManager.buildSessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+		}
+
 		this._reconnectToAgent();
 
 		// Emit session_switch event with reason "new" to extensions
@@ -1134,13 +1214,6 @@ export class AgentSession {
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
-	}
-
-	/**
-	 * Get all available models with valid API keys.
-	 */
-	async getAvailableModels(): Promise<Model<any>[]> {
-		return this._modelRegistry.getAvailable();
 	}
 
 	// =========================================================================
@@ -1580,6 +1653,217 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
+	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
+		if (bindings.uiContext !== undefined) {
+			this._extensionUIContext = bindings.uiContext;
+		}
+		if (bindings.commandContextActions !== undefined) {
+			this._extensionCommandContextActions = bindings.commandContextActions;
+		}
+		if (bindings.shutdownHandler !== undefined) {
+			this._extensionShutdownHandler = bindings.shutdownHandler;
+		}
+		if (bindings.onError !== undefined) {
+			this._extensionErrorListener = bindings.onError;
+		}
+
+		if (this._extensionRunner) {
+			this._applyExtensionBindings(this._extensionRunner);
+			await this._extensionRunner.emit({ type: "session_start" });
+		}
+	}
+
+	private _applyExtensionBindings(runner: ExtensionRunner): void {
+		runner.setUIContext(this._extensionUIContext);
+		runner.bindCommandContext(this._extensionCommandContextActions);
+
+		this._extensionErrorUnsubscriber?.();
+		this._extensionErrorUnsubscriber = this._extensionErrorListener
+			? runner.onError(this._extensionErrorListener)
+			: undefined;
+	}
+
+	private _bindExtensionCore(runner: ExtensionRunner): void {
+		runner.bindCore(
+			{
+				sendMessage: (message, options) => {
+					this.sendCustomMessage(message, options).catch((err) => {
+						runner.emitError({
+							extensionPath: "<runtime>",
+							event: "send_message",
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
+				},
+				sendUserMessage: (content, options) => {
+					this.sendUserMessage(content, options).catch((err) => {
+						runner.emitError({
+							extensionPath: "<runtime>",
+							event: "send_user_message",
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
+				},
+				appendEntry: (customType, data) => {
+					this.sessionManager.appendCustomEntry(customType, data);
+				},
+				setSessionName: (name) => {
+					this.sessionManager.appendSessionInfo(name);
+				},
+				getSessionName: () => {
+					return this.sessionManager.getSessionName();
+				},
+				setLabel: (entryId, label) => {
+					this.sessionManager.appendLabelChange(entryId, label);
+				},
+				getActiveTools: () => this.getActiveToolNames(),
+				getAllTools: () => this.getAllTools(),
+				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+				setModel: async (model) => {
+					const key = await this.modelRegistry.getApiKey(model);
+					if (!key) return false;
+					await this.setModel(model);
+					return true;
+				},
+				getThinkingLevel: () => this.thinkingLevel,
+				setThinkingLevel: (level) => this.setThinkingLevel(level),
+			},
+			{
+				getModel: () => this.model,
+				isIdle: () => !this.isStreaming,
+				abort: () => this.abort(),
+				hasPendingMessages: () => this.pendingMessageCount > 0,
+				shutdown: () => {
+					this._extensionShutdownHandler?.();
+				},
+				getContextUsage: () => this.getContextUsage(),
+				compact: (options) => {
+					void (async () => {
+						try {
+							const result = await this.compact(options?.customInstructions);
+							options?.onComplete?.(result);
+						} catch (error) {
+							const err = error instanceof Error ? error : new Error(String(error));
+							options?.onError?.(err);
+						}
+					})();
+				},
+			},
+		);
+	}
+
+	private _buildRuntime(options: {
+		activeToolNames?: string[];
+		flagValues?: Map<string, boolean | string>;
+		includeAllExtensionTools?: boolean;
+	}): void {
+		const autoResizeImages = this.settingsManager.getImageAutoResize();
+		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+		const baseTools = this._baseToolsOverride
+			? this._baseToolsOverride
+			: createAllTools(this._cwd, {
+					read: { autoResizeImages },
+					bash: { commandPrefix: shellCommandPrefix },
+				});
+
+		this._baseToolRegistry = new Map(Object.entries(baseTools).map(([name, tool]) => [name, tool as AgentTool]));
+
+		const extensionsResult = this._resourceLoader.getExtensions();
+		if (options.flagValues) {
+			for (const [name, value] of options.flagValues) {
+				extensionsResult.runtime.flagValues.set(name, value);
+			}
+		}
+
+		const hasExtensions = extensionsResult.extensions.length > 0;
+		const hasCustomTools = this._customTools.length > 0;
+		this._extensionRunner =
+			hasExtensions || hasCustomTools
+				? new ExtensionRunner(
+						extensionsResult.extensions,
+						extensionsResult.runtime,
+						this._cwd,
+						this.sessionManager,
+						this._modelRegistry,
+					)
+				: undefined;
+		if (this._extensionRunnerRef) {
+			this._extensionRunnerRef.current = this._extensionRunner;
+		}
+		if (this._extensionRunner) {
+			this._bindExtensionCore(this._extensionRunner);
+			this._applyExtensionBindings(this._extensionRunner);
+		}
+
+		const registeredTools = this._extensionRunner?.getAllRegisteredTools() ?? [];
+		const allCustomTools = [
+			...registeredTools,
+			...this._customTools.map((def) => ({ definition: def, extensionPath: "<sdk>" })),
+		];
+		const wrappedExtensionTools = this._extensionRunner
+			? wrapRegisteredTools(allCustomTools, this._extensionRunner)
+			: [];
+
+		const toolRegistry = new Map(this._baseToolRegistry);
+		for (const tool of wrappedExtensionTools as AgentTool[]) {
+			toolRegistry.set(tool.name, tool);
+		}
+
+		const defaultActiveToolNames = this._baseToolsOverride
+			? Object.keys(this._baseToolsOverride)
+			: ["read", "bash", "edit", "write"];
+		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		const activeToolNameSet = new Set<string>(baseActiveToolNames);
+		if (options.includeAllExtensionTools) {
+			for (const tool of wrappedExtensionTools as AgentTool[]) {
+				activeToolNameSet.add(tool.name);
+			}
+		}
+
+		const extensionToolNames = new Set(wrappedExtensionTools.map((tool) => tool.name));
+		const activeBaseTools = Array.from(activeToolNameSet)
+			.filter((name) => this._baseToolRegistry.has(name) && !extensionToolNames.has(name))
+			.map((name) => this._baseToolRegistry.get(name) as AgentTool);
+		const activeExtensionTools = wrappedExtensionTools.filter((tool) => activeToolNameSet.has(tool.name));
+		const activeToolsArray: AgentTool[] = [...activeBaseTools, ...activeExtensionTools];
+
+		if (this._extensionRunner) {
+			const wrappedActiveTools = wrapToolsWithExtensions(activeToolsArray, this._extensionRunner);
+			this.agent.setTools(wrappedActiveTools as AgentTool[]);
+
+			const wrappedAllTools = wrapToolsWithExtensions(Array.from(toolRegistry.values()), this._extensionRunner);
+			this._toolRegistry = new Map(wrappedAllTools.map((tool) => [tool.name, tool]));
+		} else {
+			this.agent.setTools(activeToolsArray);
+			this._toolRegistry = toolRegistry;
+		}
+
+		const systemPromptToolNames = Array.from(activeToolNameSet).filter((name) => this._baseToolRegistry.has(name));
+		this._baseSystemPrompt = this._rebuildSystemPrompt(systemPromptToolNames);
+		this.agent.setSystemPrompt(this._baseSystemPrompt);
+	}
+
+	async reload(): Promise<void> {
+		const previousFlagValues = this._extensionRunner?.getFlagValues();
+		await this._extensionRunner?.emit({ type: "session_shutdown" });
+		resetApiProviders();
+		await this._resourceLoader.reload();
+		this._buildRuntime({
+			activeToolNames: this.getActiveToolNames(),
+			flagValues: previousFlagValues,
+			includeAllExtensionTools: true,
+		});
+
+		const hasBindings =
+			this._extensionUIContext ||
+			this._extensionCommandContextActions ||
+			this._extensionShutdownHandler ||
+			this._extensionErrorListener;
+		if (this._extensionRunner && hasBindings) {
+			await this._extensionRunner.emit({ type: "session_start" });
+		}
+	}
+
 	// =========================================================================
 	// Auto-Retry
 	// =========================================================================
@@ -1596,8 +1880,8 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
-		// Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection errors, fetch failed
-		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers/i.test(
+		// Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection errors, fetch failed, terminated
+		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated/i.test(
 			err,
 		);
 	}
@@ -1651,7 +1935,7 @@ export class AgentSession {
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
-			await this._sleep(delayMs, this._retryAbortController.signal);
+			await sleep(delayMs, this._retryAbortController.signal);
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this._retryAttempt;
@@ -1676,25 +1960,6 @@ export class AgentSession {
 		}, 0);
 
 		return true;
-	}
-
-	/**
-	 * Sleep helper that respects abort signal.
-	 */
-	private _sleep(ms: number, signal?: AbortSignal): Promise<void> {
-		return new Promise((resolve, reject) => {
-			if (signal?.aborted) {
-				reject(new Error("Aborted"));
-				return;
-			}
-
-			const timeout = setTimeout(resolve, ms);
-
-			signal?.addEventListener("abort", () => {
-				clearTimeout(timeout);
-				reject(new Error("Aborted"));
-			});
-		});
 	}
 
 	/**

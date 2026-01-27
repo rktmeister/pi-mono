@@ -109,6 +109,12 @@ export class FooterComponent implements Component {
 			pwd = `${pwd} (${branch})`;
 		}
 
+		// Add session name if set
+		const sessionName = this.session.sessionManager.getSessionName();
+		if (sessionName) {
+			pwd = `${pwd} • ${sessionName}`;
+		}
+
 		// Truncate path if too long to fit width
 		if (pwd.length > width) {
 			const half = Math.floor(width / 2) - 2;
@@ -160,6 +166,11 @@ export class FooterComponent implements Component {
 			if (thinkingLevel !== "off") {
 				rightSide = `${modelName} • ${thinkingLevel}`;
 			}
+		}
+
+		// Prepend the provider in parenthesis to the right side if there's multiple providers
+		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+			rightSide = `(${state.model.provider}) ${rightSide}`;
 		}
 
 		let statsLeftWidth = visibleWidth(statsLeft);

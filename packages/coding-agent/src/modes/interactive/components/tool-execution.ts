@@ -9,6 +9,7 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	truncateToWidth,
 } from "@mariozechner/pi-tui";
 import stripAnsi from "strip-ansi";
 import type { ToolDefinition } from "../../../core/extensions/types.js";
@@ -368,7 +369,6 @@ export class ToolExecutionComponent extends Container {
 					this.contentBox.addChild(new Text(`\n${styledOutput}`, 0, 0));
 				} else {
 					// Use visual line truncation when collapsed with width-aware caching
-					const textContent = `\n${styledOutput}`;
 					let cachedWidth: number | undefined;
 					let cachedLines: string[] | undefined;
 					let cachedSkipped: number | undefined;
@@ -376,7 +376,7 @@ export class ToolExecutionComponent extends Container {
 					this.contentBox.addChild({
 						render: (width: number) => {
 							if (cachedLines === undefined || cachedWidth !== width) {
-								const result = truncateToVisualLines(textContent, BASH_PREVIEW_LINES, width);
+								const result = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
 								cachedLines = result.visualLines;
 								cachedSkipped = result.skippedCount;
 								cachedWidth = width;
@@ -385,9 +385,10 @@ export class ToolExecutionComponent extends Container {
 								const hint =
 									theme.fg("muted", `... (${cachedSkipped} earlier lines,`) +
 									` ${keyHint("expandTools", "to expand")})`;
-								return ["", hint, ...cachedLines];
+								return ["", truncateToWidth(hint, width, "..."), ...cachedLines];
 							}
-							return cachedLines;
+							// Add blank line for spacing (matches expanded case)
+							return ["", ...cachedLines];
 						},
 						invalidate: () => {
 							cachedWidth = undefined;
@@ -540,6 +541,14 @@ export class ToolExecutionComponent extends Container {
 					text +=
 						theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`) +
 						` ${keyHint("expandTools", "to expand")})`;
+				}
+			}
+
+			// Show error if tool execution failed
+			if (this.result?.isError) {
+				const errorText = this.getTextOutput();
+				if (errorText) {
+					text += `\n\n${theme.fg("error", errorText)}`;
 				}
 			}
 		} else if (this.toolName === "edit") {

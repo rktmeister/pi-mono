@@ -54,11 +54,11 @@
       }
 
       // Label lookup (entryId -> label string)
-      // Labels are stored in 'label' entries that reference their target via parentId
+      // Labels are stored in 'label' entries that reference their target via targetId
       const labelMap = new Map();
       for (const entry of entries) {
-        if (entry.type === 'label' && entry.parentId && entry.label) {
-          labelMap.set(entry.parentId, entry.label);
+        if (entry.type === 'label' && entry.targetId && entry.label) {
+          labelMap.set(entry.targetId, entry.label);
         }
       }
 
@@ -142,6 +142,37 @@
           current = byId.get(current.parentId);
         }
         return path;
+      }
+
+      // Tree node lookup for finding leaves
+      let treeNodeMap = null;
+
+      /**
+       * Find the newest leaf node reachable from a given node.
+       * This allows clicking any node in a branch to show the full branch.
+       * Children are sorted by timestamp, so the newest is always last.
+       */
+      function findNewestLeaf(nodeId) {
+        // Build tree node map lazily
+        if (!treeNodeMap) {
+          treeNodeMap = new Map();
+          const tree = buildTree();
+          function mapNodes(node) {
+            treeNodeMap.set(node.entry.id, node);
+            node.children.forEach(mapNodes);
+          }
+          tree.forEach(mapNodes);
+        }
+
+        const node = treeNodeMap.get(nodeId);
+        if (!node) return nodeId;
+
+        // Follow the newest (last) child at each level
+        let current = node;
+        while (current.children.length > 0) {
+          current = current.children[current.children.length - 1];
+        }
+        return current.entry.id;
       }
 
       /**
@@ -634,6 +665,7 @@
       // ============================================================
 
       let currentLeafId = leafId;
+      let currentTargetId = urlTargetId || leafId;
       let treeRendered = false;
 
       function renderTree() {
@@ -650,12 +682,12 @@
           for (const flatNode of filtered) {
             const entry = flatNode.node.entry;
             const isOnPath = activePathIds.has(entry.id);
-            const isLeaf = entry.id === currentLeafId;
+            const isTarget = entry.id === currentTargetId;
 
             const div = document.createElement('div');
             div.className = 'tree-node';
             if (isOnPath) div.classList.add('in-path');
-            if (isLeaf) div.classList.add('active');
+            if (isTarget) div.classList.add('active');
             div.dataset.id = entry.id;
 
             const prefix = buildTreePrefix(flatNode);
@@ -674,7 +706,11 @@
             div.appendChild(prefixSpan);
             div.appendChild(marker);
             div.appendChild(content);
-            div.addEventListener('click', () => navigateTo(entry.id));
+            // Navigate to the newest leaf through this node, but scroll to the clicked node
+            div.addEventListener('click', () => {
+              const leafId = findNewestLeaf(entry.id);
+              navigateTo(leafId, 'target', entry.id);
+            });
 
             container.appendChild(div);
           }
@@ -686,10 +722,10 @@
           for (const node of nodes) {
             const id = node.dataset.id;
             const isOnPath = activePathIds.has(id);
-            const isLeaf = id === currentLeafId;
+            const isTarget = id === currentTargetId;
 
             node.classList.toggle('in-path', isOnPath);
-            node.classList.toggle('active', isLeaf);
+            node.classList.toggle('active', isTarget);
 
             const marker = node.querySelector('.tree-marker');
             if (marker) {
@@ -955,6 +991,33 @@
       }
 
       /**
+       * Download the session data as a JSONL file.
+       * Reconstructs the original format: header line + entry lines.
+       */
+      window.downloadSessionJson = function() {
+        // Build JSONL content: header first, then all entries
+        const lines = [];
+        if (header) {
+          lines.push(JSON.stringify({ type: 'header', ...header }));
+        }
+        for (const entry of entries) {
+          lines.push(JSON.stringify(entry));
+        }
+        const jsonlContent = lines.join('\n');
+
+        // Create download
+        const blob = new Blob([jsonlContent], { type: 'application/x-ndjson' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${header?.id || 'session'}.jsonl`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      /**
        * Build a shareable URL for a specific message.
        * URL format: base?gistId&leafId=<leafId>&targetId=<entryId>
        */
@@ -1212,7 +1275,10 @@
         let html = `
           <div class="header">
             <h1>Session: ${escapeHtml(header?.id || 'unknown')}</h1>
-            <div class="help-bar">Ctrl+T toggle thinking · Ctrl+O toggle tools</div>
+            <div class="help-bar">
+              <span>Ctrl+T toggle thinking · Ctrl+O toggle tools</span>
+              <button class="download-json-btn" onclick="downloadSessionJson()" title="Download session as JSONL">↓ JSONL</button>
+            </div>
             <div class="header-info">
               <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : 'unknown'}</span></div>
               <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${globalStats.models.join(', ') || 'unknown'}</span></div>
@@ -1286,6 +1352,7 @@
 
       function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null) {
         currentLeafId = targetId;
+        currentTargetId = scrollToEntryId || targetId;
         const path = getPath(targetId);
 
         renderTree();

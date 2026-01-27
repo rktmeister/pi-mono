@@ -4,8 +4,8 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
+import { getEnvApiKey } from "../env-api-keys.js";
 import { calculateCost } from "../models.js";
-import { getEnvApiKey } from "../stream.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -13,6 +13,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
 	StreamOptions,
@@ -26,6 +27,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 
+import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
@@ -126,7 +128,17 @@ export interface AnthropicOptions extends StreamOptions {
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 }
 
-export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
+function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
+	const merged: Record<string, string> = {};
+	for (const headers of headerSources) {
+		if (headers) {
+			Object.assign(merged, headers);
+		}
+	}
+	return merged;
+}
+
+export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	model: Model<"anthropic-messages">,
 	context: Context,
 	options?: AnthropicOptions,
@@ -137,7 +149,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
-			api: "anthropic-messages" as Api,
+			api: model.api as Api,
 			provider: model.provider,
 			model: model.id,
 			usage: {
@@ -154,7 +166,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 
 		try {
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
-			const { client, isOAuthToken } = createClient(model, apiKey, options?.interleavedThinking ?? true);
+			const { client, isOAuthToken } = createClient(
+				model,
+				apiKey,
+				options?.interleavedThinking ?? true,
+				options?.headers,
+			);
 			const params = buildParams(model, context, isOAuthToken, options);
 			options?.onPayload?.(params);
 			const anthropicStream = client.messages.stream({ ...params, stream: true }, { signal: options?.signal });
@@ -320,6 +337,36 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 	return stream;
 };
 
+export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
+	model: Model<"anthropic-messages">,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream => {
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	if (!apiKey) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
+
+	const base = buildBaseOptions(model, options, apiKey);
+	if (!options?.reasoning) {
+		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
+	}
+
+	const adjusted = adjustMaxTokensForThinking(
+		base.maxTokens || 0,
+		model.maxTokens,
+		options.reasoning,
+		options.thinkingBudgets,
+	);
+
+	return streamAnthropic(model, context, {
+		...base,
+		maxTokens: adjusted.maxTokens,
+		thinkingEnabled: true,
+		thinkingBudgetTokens: adjusted.thinkingBudget,
+	} satisfies AnthropicOptions);
+};
+
 function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
@@ -328,6 +375,7 @@ function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string,
 	interleavedThinking: boolean,
+	optionsHeaders?: Record<string, string>,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	const betaFeatures = ["fine-grained-tool-streaming-2025-05-14"];
 	if (interleavedThinking) {
@@ -337,14 +385,17 @@ function createClient(
 	const oauthToken = isOAuthToken(apiKey);
 	if (oauthToken) {
 		// Stealth mode: Mimic Claude Code's headers exactly
-		const defaultHeaders = {
-			accept: "application/json",
-			"anthropic-dangerous-direct-browser-access": "true",
-			"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
-			"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
-			"x-app": "cli",
-			...(model.headers || {}),
-		};
+		const defaultHeaders = mergeHeaders(
+			{
+				accept: "application/json",
+				"anthropic-dangerous-direct-browser-access": "true",
+				"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
+				"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
+				"x-app": "cli",
+			},
+			model.headers,
+			optionsHeaders,
+		);
 
 		const client = new Anthropic({
 			apiKey: null,
@@ -357,12 +408,15 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	const defaultHeaders = {
-		accept: "application/json",
-		"anthropic-dangerous-direct-browser-access": "true",
-		"anthropic-beta": betaFeatures.join(","),
-		...(model.headers || {}),
-	};
+	const defaultHeaders = mergeHeaders(
+		{
+			accept: "application/json",
+			"anthropic-dangerous-direct-browser-access": "true",
+			"anthropic-beta": betaFeatures.join(","),
+		},
+		model.headers,
+		optionsHeaders,
+	);
 
 	const client = new Anthropic({
 		apiKey,

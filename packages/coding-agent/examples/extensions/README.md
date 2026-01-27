@@ -34,6 +34,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `questionnaire.ts` | Multi-question input with tab bar navigation between questions |
 | `tool-override.ts` | Override built-in tools (e.g., add logging/access control to `read`) |
 | `truncated-tool.ts` | Wraps ripgrep with proper output truncation (50KB/2000 lines) |
+| `antigravity-image-gen.ts` | Generate images via Google Antigravity with optional save-to-disk modes |
 | `ssh.ts` | Delegate all tools to a remote machine via SSH using pluggable operations |
 | `subagent/` | Delegate tasks to specialized subagents with isolated context windows |
 
@@ -47,6 +48,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `handoff.ts` | Transfer context to a new focused session via `/handoff <goal>` |
 | `qna.ts` | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
 | `status-line.ts` | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors |
+| `widget-placement.ts` | Shows widgets above and below the editor via `ctx.ui.setWidget()` placement |
 | `model-status.ts` | Shows model changes in status bar via `model_select` hook |
 | `snake.ts` | Snake game with custom UI, keyboard handling, and session persistence |
 | `send-user-message.ts` | Demonstrates `pi.sendUserMessage()` for sending user messages from extensions |
@@ -62,6 +64,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `doom-overlay/` | DOOM game running as an overlay at 35 FPS (demonstrates real-time game rendering) |
 | `shutdown-command.ts` | Adds `/quit` command demonstrating `ctx.shutdown()` |
 | `interactive-shell.ts` | Run interactive commands (vim, htop) with full terminal via `user_bash` hook |
+| `inline-bash.ts` | Expands `!{command}` patterns in prompts via `input` event transformation |
 
 ### Git Integration
 
@@ -85,12 +88,32 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 |-----------|-------------|
 | `mac-system-theme.ts` | Syncs pi theme with macOS dark/light mode |
 
+### Messages & Communication
+
+| Extension | Description |
+|-----------|-------------|
+| `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
+| `event-bus.ts` | Inter-extension communication via `pi.events` |
+
+### Session Metadata
+
+| Extension | Description |
+|-----------|-------------|
+| `session-name.ts` | Name sessions for the session selector via `setSessionName` |
+| `bookmark.ts` | Bookmark entries with labels for `/tree` navigation via `setLabel` |
+
+### Custom Providers
+
+| Extension | Description |
+|-----------|-------------|
+| `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
+| `custom-provider-gitlab-duo/` | GitLab Duo provider using pi-ai's built-in Anthropic/OpenAI streaming via proxy |
+
 ### External Dependencies
 
 | Extension | Description |
 |-----------|-------------|
-| `chalk-logger.ts` | Uses chalk from parent node_modules (demonstrates jiti module resolution) |
-| `with-deps/` | Extension with its own package.json and dependencies |
+| `with-deps/` | Extension with its own package.json and dependencies (demonstrates jiti module resolution) |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation |
 
 ## Writing Extensions

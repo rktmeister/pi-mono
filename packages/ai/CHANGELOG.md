@@ -2,11 +2,69 @@
 
 ## [Unreleased]
 
+## [0.50.1] - 2026-01-26
+
+### Fixed
+
+- Fixed OpenCode Zen model generation to exclude deprecated models ([#970](https://github.com/badlogic/pi-mono/pull/970) by [@DanielTatarkin](https://github.com/DanielTatarkin))
+
+## [0.50.0] - 2026-01-26
+
+### Added
+
+- Added OpenRouter provider routing support for custom models via `openRouterRouting` compat field ([#859](https://github.com/badlogic/pi-mono/pull/859) by [@v01dpr1mr0s3](https://github.com/v01dpr1mr0s3))
+- Added `azure-openai-responses` provider support for Azure OpenAI Responses API. ([#890](https://github.com/badlogic/pi-mono/pull/890) by [@markusylisiurunen](https://github.com/markusylisiurunen))
+- Added HTTP proxy environment variable support for API requests ([#942](https://github.com/badlogic/pi-mono/pull/942) by [@haoqixu](https://github.com/haoqixu))
+- Added `createAssistantMessageEventStream()` factory function for use in extensions.
+- Added `resetApiProviders()` to clear and re-register built-in API providers.
+
+### Changed
+
+- Refactored API streaming dispatch to use an API registry with provider-owned `streamSimple` mapping.
+- Moved environment API key resolution to `env-api-keys.ts` and re-exported it from the package entrypoint.
+- Azure OpenAI Responses provider now uses base URL configuration with deployment-aware model mapping and no longer includes service tier handling.
+
+### Fixed
+
+- Fixed Bun runtime detection for dynamic imports in browser-compatible modules (stream.ts, openai-codex-responses.ts, openai-codex.ts) ([#922](https://github.com/badlogic/pi-mono/pull/922) by [@dannote](https://github.com/dannote))
+- Fixed streaming functions to use `model.api` instead of hardcoded API types
+- Fixed Google providers to default tool call arguments to an empty object when omitted
+- Fixed OpenAI Responses streaming to handle `arguments.done` events on OpenAI-compatible endpoints ([#917](https://github.com/badlogic/pi-mono/pull/917) by [@williballenthin](https://github.com/williballenthin))
+- Fixed OpenAI Codex Responses tool strictness handling after the shared responses refactor
+- Fixed Azure OpenAI Responses streaming to guard deltas before content parts and correct metadata and handoff gating
+- Fixed OpenAI completions tool-result image batching after consecutive tool results ([#902](https://github.com/badlogic/pi-mono/pull/902) by [@terrorobe](https://github.com/terrorobe))
+
+## [0.49.3] - 2026-01-22
+
+### Added
+
+- Added `headers` option to `StreamOptions` for custom HTTP headers in API requests. Supported by all providers except Amazon Bedrock (which uses AWS SDK auth). Headers are merged with provider defaults and `model.headers`, with `options.headers` taking precedence.
+- Added `originator` option to `loginOpenAICodex()` for custom OAuth client identification
+- Browser compatibility for pi-ai: replaced top-level Node.js imports with dynamic imports for browser environments ([#873](https://github.com/badlogic/pi-mono/issues/873))
+
+### Fixed
+
+- Fixed OpenAI Responses API 400 error "function_call without required reasoning item" when switching between models (same provider, different model). The fix omits the `id` field for function_calls from different models to avoid triggering OpenAI's reasoning/function_call pairing validation ([#886](https://github.com/badlogic/pi-mono/issues/886))
+
+## [0.49.2] - 2026-01-19
+
+### Added
+
+- Added AWS credential detection for ECS/Kubernetes environments: `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`, `AWS_WEB_IDENTITY_TOKEN_FILE` ([#848](https://github.com/badlogic/pi-mono/issues/848))
+
+### Fixed
+
+- Fixed OpenAI Responses 400 error "reasoning without following item" by skipping errored/aborted assistant messages entirely in transform-messages.ts ([#838](https://github.com/badlogic/pi-mono/pull/838))
+
+### Removed
+
+- Removed `strictResponsesPairing` compat option (no longer needed after the transform-messages fix)
+
 ## [0.49.1] - 2026-01-18
 
 ### Added
 
-- Added `OpenAIResponsesCompat` interface with `strictResponsesPairing` option for Azure OpenAI Responses API, which requires strict reasoning/message pairing in history replay ([#768](https://github.com/badlogic/pi-mono/pull/768) by [@nicobako](https://github.com/nicobako))
+- Added `OpenAIResponsesCompat` interface with `strictResponsesPairing` option for Azure OpenAI Responses API, which requires strict reasoning/message pairing in history replay ([#768](https://github.com/badlogic/pi-mono/pull/768) by [@prateekmedia](https://github.com/prateekmedia))
 
 ### Changed
 

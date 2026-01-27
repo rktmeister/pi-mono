@@ -15,7 +15,11 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
-import type { Api, Context, Model, OptionsForApi, Usage } from "../src/types.js";
+import type { Api, Context, Model, StreamOptions, Usage } from "../src/types.js";
+
+type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
+
+import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
@@ -44,7 +48,7 @@ Remember: Always be helpful and concise.`;
 
 async function testTotalTokensWithCache<TApi extends Api>(
 	llm: Model<TApi>,
-	options: OptionsForApi<TApi> = {} as OptionsForApi<TApi>,
+	options: StreamOptionsWithExtras = {},
 ): Promise<{ first: Usage; second: Usage }> {
 	// First request - no cache
 	const context1: Context = {
@@ -187,6 +191,27 @@ describe("totalTokens field", () => {
 			assertTotalTokensEqualsComponents(first);
 			assertTotalTokensEqualsComponents(second);
 		});
+	});
+
+	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses", () => {
+		it(
+			"gpt-4o-mini - should return totalTokens equal to sum of components",
+			{ retry: 3, timeout: 60000 },
+			async () => {
+				const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+				const azureDeploymentName = resolveAzureDeploymentName(llm.id);
+				const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
+
+				console.log(`\nAzure OpenAI Responses / ${llm.id}:`);
+				const { first, second } = await testTotalTokensWithCache(llm, azureOptions);
+
+				logUsage("First request", first);
+				logUsage("Second request", second);
+
+				assertTotalTokensEqualsComponents(first);
+				assertTotalTokensEqualsComponents(second);
+			},
+		);
 	});
 
 	// =========================================================================

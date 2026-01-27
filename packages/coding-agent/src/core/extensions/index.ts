@@ -58,6 +58,7 @@ export type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionWidgetOptions,
 	FindToolResultEvent,
 	GetActiveToolsHandler,
 	GetAllToolsHandler,
@@ -75,6 +76,9 @@ export type {
 	MessageRenderOptions,
 	ModelSelectEvent,
 	ModelSelectSource,
+	// Provider Registration
+	ProviderConfig,
+	ProviderModelConfig,
 	ReadToolResultEvent,
 	// Commands
 	RegisteredCommand,
@@ -116,6 +120,7 @@ export type {
 	// Events - User Bash
 	UserBashEvent,
 	UserBashEventResult,
+	WidgetPlacement,
 	WriteToolResultEvent,
 } from "./types.js";
 // Type guards
