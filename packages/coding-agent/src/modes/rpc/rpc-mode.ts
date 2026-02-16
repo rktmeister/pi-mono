@@ -26,6 +26,7 @@ import type {
 	RpcExtensionUIResponse,
 	RpcResponse,
 	RpcSessionState,
+	RpcSlashCommand,
 } from "./rpc-types.js";
 
 // Re-export types for consumers
@@ -143,6 +144,11 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			} as RpcExtensionUIRequest);
 		},
 
+		onTerminalInput(): () => void {
+			// Raw terminal input not supported in RPC mode
+			return () => {};
+		},
+
 		setStatus(key: string, text: string | undefined): void {
 			// Fire and forget - no response needed
 			output({
@@ -194,6 +200,11 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 		async custom() {
 			// Custom UI not supported in RPC mode
 			return undefined as never;
+		},
+
+		pasteToEditor(text: string): void {
+			// Paste handling not supported in RPC mode - falls back to setEditorText
+			this.setEditorText(text);
 		},
 
 		setEditorText(text: string): void {
@@ -251,6 +262,15 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// Theme switching not supported in RPC mode
 			return { success: false, error: "Theme switching not supported in RPC mode" };
 		},
+
+		getToolsExpanded() {
+			// Tool expansion not supported in RPC mode - no TUI
+			return false;
+		},
+
+		setToolsExpanded(_expanded: boolean) {
+			// Tool expansion not supported in RPC mode - no TUI
+		},
 	});
 
 	// Set up extensions with RPC-based UI context
@@ -275,6 +295,13 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					label: options?.label,
 				});
 				return { cancelled: result.cancelled };
+			},
+			switchSession: async (sessionPath) => {
+				const success = await session.switchSession(sessionPath);
+				return { cancelled: !success };
+			},
+			reload: async () => {
+				await session.reload();
 			},
 		},
 		shutdownHandler: () => {
@@ -314,12 +341,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			}
 
 			case "steer": {
-				await session.steer(command.message);
+				await session.steer(command.message, command.images);
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message);
+				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
 			}
 
@@ -348,6 +375,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					followUpMode: session.followUpMode,
 					sessionFile: session.sessionFile,
 					sessionId: session.sessionId,
+					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
@@ -489,12 +517,63 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				return success(id, "get_last_assistant_text", { text });
 			}
 
+			case "set_session_name": {
+				const name = command.name.trim();
+				if (!name) {
+					return error(id, "set_session_name", "Session name cannot be empty");
+				}
+				session.setSessionName(name);
+				return success(id, "set_session_name");
+			}
+
 			// =================================================================
 			// Messages
 			// =================================================================
 
 			case "get_messages": {
 				return success(id, "get_messages", { messages: session.messages });
+			}
+
+			// =================================================================
+			// Commands (available for invocation via prompt)
+			// =================================================================
+
+			case "get_commands": {
+				const commands: RpcSlashCommand[] = [];
+
+				// Extension commands
+				for (const { command, extensionPath } of session.extensionRunner?.getRegisteredCommandsWithPaths() ?? []) {
+					commands.push({
+						name: command.name,
+						description: command.description,
+						source: "extension",
+						path: extensionPath,
+					});
+				}
+
+				// Prompt templates (source is always "user" | "project" | "path" in coding-agent)
+				for (const template of session.promptTemplates) {
+					commands.push({
+						name: template.name,
+						description: template.description,
+						source: "prompt",
+						location: template.source as RpcSlashCommand["location"],
+						path: template.filePath,
+					});
+				}
+
+				// Skills (source is always "user" | "project" | "path" in coding-agent)
+				for (const skill of session.resourceLoader.getSkills().skills) {
+					commands.push({
+						name: `skill:${skill.name}`,
+						description: skill.description,
+						source: "skill",
+						location: skill.source as RpcSlashCommand["location"],
+						path: skill.filePath,
+					});
+				}
+
+				return success(id, "get_commands", { commands });
 			}
 
 			default: {

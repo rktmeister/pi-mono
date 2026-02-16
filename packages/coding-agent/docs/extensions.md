@@ -79,7 +79,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       name: Type.String({ description: "Name to greet" }),
     }),
-    async execute(toolCallId, params, onUpdate, ctx, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       return {
         content: [{ type: "text", text: `Hello, ${params.name}!` }],
         details: {},
@@ -237,6 +237,7 @@ user sends prompt ────────────────────�
   ├─► (skill/template expansion if not handled)            │
   ├─► before_agent_start (can inject message, modify system prompt)
   ├─► agent_start                                          │
+  ├─► message_start / message_update / message_end         │
   │                                                        │
   │   ┌─── turn (repeats while LLM calls tools) ───┐       │
   │   │                                            │       │
@@ -245,7 +246,9 @@ user sends prompt ────────────────────�
   │   │                                            │       │
   │   │   LLM responds, may call tools:            │       │
   │   │     ├─► tool_call (can block)              │       │
-  │   │     │   tool executes                      │       │
+  │   │     ├─► tool_execution_start               │       │
+  │   │     ├─► tool_execution_update              │       │
+  │   │     ├─► tool_execution_end                 │       │
   │   │     └─► tool_result (can modify)           │       │
   │   │                                            │       │
   │   └─► turn_end                                 │       │
@@ -434,6 +437,46 @@ pi.on("turn_end", async (event, ctx) => {
 });
 ```
 
+#### message_start / message_update / message_end
+
+Fired for message lifecycle updates.
+
+- `message_start` and `message_end` fire for user, assistant, and toolResult messages.
+- `message_update` fires for assistant streaming updates.
+
+```typescript
+pi.on("message_start", async (event, ctx) => {
+  // event.message
+});
+
+pi.on("message_update", async (event, ctx) => {
+  // event.message
+  // event.assistantMessageEvent (token-by-token stream event)
+});
+
+pi.on("message_end", async (event, ctx) => {
+  // event.message
+});
+```
+
+#### tool_execution_start / tool_execution_update / tool_execution_end
+
+Fired for tool execution lifecycle updates.
+
+```typescript
+pi.on("tool_execution_start", async (event, ctx) => {
+  // event.toolCallId, event.toolName, event.args
+});
+
+pi.on("tool_execution_update", async (event, ctx) => {
+  // event.toolCallId, event.toolName, event.args, event.partialResult
+});
+
+pi.on("tool_execution_end", async (event, ctx) => {
+  // event.toolCallId, event.toolName, event.result, event.isError
+});
+```
+
 #### context
 
 Fired before each LLM call. Modify messages non-destructively. See [session.md](session.md) for message types.
@@ -473,16 +516,49 @@ Use this to update UI elements (status bars, footers) or perform model-specific 
 
 #### tool_call
 
-Fired before tool executes. **Can block.**
+Fired before tool executes. **Can block.** Use `isToolCallEventType` to narrow and get typed inputs.
 
 ```typescript
+import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+
 pi.on("tool_call", async (event, ctx) => {
   // event.toolName - "bash", "read", "write", "edit", etc.
   // event.toolCallId
   // event.input - tool parameters
 
-  if (shouldBlock(event)) {
-    return { block: true, reason: "Not allowed" };
+  // Built-in tools: no type params needed
+  if (isToolCallEventType("bash", event)) {
+    // event.input is { command: string; timeout?: number }
+    if (event.input.command.includes("rm -rf")) {
+      return { block: true, reason: "Dangerous command" };
+    }
+  }
+
+  if (isToolCallEventType("read", event)) {
+    // event.input is { path: string; offset?: number; limit?: number }
+    console.log(`Reading: ${event.input.path}`);
+  }
+});
+```
+
+#### Typing custom tool input
+
+Custom tools should export their input type:
+
+```typescript
+// my-extension.ts
+export type MyToolInput = Static<typeof myToolSchema>;
+```
+
+Use `isToolCallEventType` with explicit type parameters:
+
+```typescript
+import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import type { MyToolInput } from "my-extension";
+
+pi.on("tool_call", (event) => {
+  if (isToolCallEventType<"my_tool", MyToolInput>("my_tool", event)) {
+    event.input.action;  // typed
   }
 });
 ```
@@ -490,6 +566,11 @@ pi.on("tool_call", async (event, ctx) => {
 #### tool_result
 
 Fired after tool executes. **Can modify result.**
+
+`tool_result` handlers chain like middleware:
+- Handlers run in extension load order
+- Each handler sees the latest result after previous handler changes
+- Handlers can return partial patches (`content`, `details`, or `isError`); omitted fields keep their current values
 
 ```typescript
 import { isBashToolResult } from "@mariozechner/pi-coding-agent";
@@ -585,7 +666,7 @@ UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
 
 ### ctx.hasUI
 
-`false` in print mode (`-p`), JSON mode, and RPC mode. Always check before using `ctx.ui`.
+`false` in print mode (`-p`) and JSON mode. `true` in interactive and RPC mode. In RPC mode, dialog methods (`select`, `confirm`, `input`, `editor`) work via the extension UI sub-protocol, and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) emit requests to the client. Some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extension-ui-protocol)).
 
 ### ctx.cwd
 
@@ -651,6 +732,17 @@ ctx.compact({
   onError: (error) => {
     ctx.ui.notify(`Compaction failed: ${error.message}`, "error");
   },
+});
+```
+
+### ctx.getSystemPrompt()
+
+Returns the current effective system prompt. This includes any modifications made by `before_agent_start` handlers for the current turn.
+
+```typescript
+pi.on("before_agent_start", (event, ctx) => {
+  const prompt = ctx.getSystemPrompt();
+  console.log(`System prompt length: ${prompt.length}`);
 });
 ```
 
@@ -722,6 +814,62 @@ Options:
 - `replaceInstructions`: If true, `customInstructions` replaces the default prompt instead of being appended
 - `label`: Label to attach to the branch summary entry (or target entry if not summarizing)
 
+### ctx.reload()
+
+Run the same reload flow as `/reload`.
+
+```typescript
+pi.registerCommand("reload-runtime", {
+  description: "Reload extensions, skills, prompts, and themes",
+  handler: async (_args, ctx) => {
+    await ctx.reload();
+    return;
+  },
+});
+```
+
+Important behavior:
+- `await ctx.reload()` emits `session_shutdown` for the current extension runtime
+- It then reloads resources and emits `session_start` (and `resources_discover` with reason `"reload"`) for the new runtime
+- The currently running command handler still continues in the old call frame
+- Code after `await ctx.reload()` still runs from the pre-reload version
+- Code after `await ctx.reload()` must not assume old in-memory extension state is still valid
+- After the handler returns, future commands/events/tool calls use the new extension version
+
+For predictable behavior, treat reload as terminal for that handler (`await ctx.reload(); return;`).
+
+Tools run with `ExtensionContext`, so they cannot call `ctx.reload()` directly. Use a command as the reload entrypoint, then expose a tool that queues that command as a follow-up user message.
+
+Example tool the LLM can call to trigger reload:
+
+```typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+
+export default function (pi: ExtensionAPI) {
+  pi.registerCommand("reload-runtime", {
+    description: "Reload extensions, skills, prompts, and themes",
+    handler: async (_args, ctx) => {
+      await ctx.reload();
+      return;
+    },
+  });
+
+  pi.registerTool({
+    name: "reload_runtime",
+    label: "Reload Runtime",
+    description: "Reload extensions, skills, prompts, and themes",
+    parameters: Type.Object({}),
+    async execute() {
+      pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp" });
+      return {
+        content: [{ type: "text", text: "Queued /reload-runtime as a follow-up command." }],
+      };
+    },
+  });
+}
+```
+
 ## ExtensionAPI Methods
 
 ### pi.on(event, handler)
@@ -745,7 +893,7 @@ pi.registerTool({
     text: Type.Optional(Type.String()),
   }),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
+  async execute(toolCallId, params, signal, onUpdate, ctx) {
     // Stream progress
     onUpdate?.({ content: [{ type: "text", text: "Working..." }] });
 
@@ -897,6 +1045,31 @@ pi.registerCommand("deploy", {
   },
 });
 ```
+
+### pi.getCommands()
+
+Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
+The list matches the RPC `get_commands` ordering: extensions first, then templates, then skills.
+
+```typescript
+const commands = pi.getCommands();
+const bySource = commands.filter((command) => command.source === "extension");
+```
+
+Each entry has this shape:
+
+```typescript
+{
+  name: string; // Command name without the leading slash
+  description?: string;
+  source: "extension" | "prompt" | "skill";
+  location?: "user" | "project" | "path"; // For templates and skills
+  path?: string; // Files backing templates, skills, and extensions
+}
+```
+
+Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
+mode and would not execute if sent via `prompt`.
 
 ### pi.registerMessageRenderer(customType, renderer)
 
@@ -1071,7 +1244,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "my_tool",
     // ...
-    async execute(toolCallId, params, onUpdate, ctx, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       items.push("new item");
       return {
         content: [{ type: "text", text: "Added" }],
@@ -1085,6 +1258,8 @@ export default function (pi: ExtensionAPI) {
 ## Custom Tools
 
 Register tools the LLM can call via `pi.registerTool()`. Tools appear in the system prompt and can have custom rendering.
+
+Note: Some models are idiots and include the @ prefix in tool path arguments. Built-in tools strip a leading @ before resolving paths. If your custom tool accepts a path, normalize a leading @ as well.
 
 ### Tool Definition
 
@@ -1102,7 +1277,7 @@ pi.registerTool({
     text: Type.Optional(Type.String()),
   }),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
+  async execute(toolCallId, params, signal, onUpdate, ctx) {
     // Check for cancellation
     if (signal?.aborted) {
       return { content: [{ type: "text", text: "Cancelled" }] };
@@ -1180,7 +1355,7 @@ const remoteRead = createReadTool(cwd, {
 // Register, checking flag at execution time
 pi.registerTool({
   ...remoteRead,
-  async execute(id, params, onUpdate, _ctx, signal) {
+  async execute(id, params, signal, onUpdate, _ctx) {
     const ssh = getSshConfig();
     if (ssh) {
       const tool = createReadTool(cwd, { operations: createRemoteOps(ssh) });
@@ -1192,6 +1367,20 @@ pi.registerTool({
 ```
 
 **Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
+
+The bash tool also supports a spawn hook to adjust the command, cwd, or env before execution:
+
+```typescript
+import { createBashTool } from "@mariozechner/pi-coding-agent";
+
+const bashTool = createBashTool(cwd, {
+  spawnHook: ({ command, cwd, env }) => ({
+    command: `source ~/.profile\n${command}`,
+    cwd: `/mnt/sandbox${cwd}`,
+    env: { ...env, CI: "1" },
+  }),
+});
+```
 
 See [examples/extensions/ssh.ts](../examples/extensions/ssh.ts) for a complete SSH example with `--ssh` flag.
 
@@ -1214,7 +1403,7 @@ import {
   DEFAULT_MAX_LINES, // 2000
 } from "@mariozechner/pi-coding-agent";
 
-async execute(toolCallId, params, onUpdate, ctx, signal) {
+async execute(toolCallId, params, signal, onUpdate, ctx) {
   const output = await runCommand();
 
   // Apply truncation
@@ -1466,6 +1655,14 @@ ctx.ui.setTitle("pi - my-project");
 ctx.ui.setEditorText("Prefill text");
 const current = ctx.ui.getEditorText();
 
+// Paste into editor (triggers paste handling, including collapse for large content)
+ctx.ui.pasteToEditor("pasted content");
+
+// Tool output expansion
+const wasExpanded = ctx.ui.getToolsExpanded();
+ctx.ui.setToolsExpanded(true);
+ctx.ui.setToolsExpanded(wasExpanded);
+
 // Custom editor (vim mode, emacs mode, etc.)
 ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings));
 ctx.ui.setEditorComponent(undefined);  // Restore default editor
@@ -1680,6 +1877,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `handoff.ts` | Cross-provider model handoff | `registerCommand`, `ui.editor`, `ui.custom` |
 | `qna.ts` | Q&A with custom UI | `registerCommand`, `ui.custom`, `setEditorText` |
 | `send-user-message.ts` | Inject user messages | `registerCommand`, `sendUserMessage` |
+| `reload-runtime.ts` | Reload command and LLM tool handoff | `registerCommand`, `ctx.reload()`, `sendUserMessage` |
 | `shutdown-command.ts` | Graceful shutdown command | `registerCommand`, `shutdown()` |
 | **Events & Gates** |||
 | `permission-gate.ts` | Block dangerous commands | `on("tool_call")`, `ui.confirm` |
@@ -1688,6 +1886,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `dirty-repo-guard.ts` | Warn on dirty git repo | `on("session_before_*")`, `exec` |
 | `input-transform.ts` | Transform user input | `on("input")` |
 | `model-status.ts` | React to model changes | `on("model_select")`, `setStatus` |
+| `system-prompt-header.ts` | Display system prompt info | `on("agent_start")`, `getSystemPrompt` |
 | `claude-rules.ts` | Load rules from files | `on("session_start")`, `on("before_agent_start")` |
 | `file-trigger.ts` | File watcher triggers messages | `sendMessage` |
 | **Compaction & Sessions** |||
@@ -1732,4 +1931,5 @@ All examples in [examples/extensions/](../examples/extensions/).
 | **Misc** |||
 | `antigravity-image-gen.ts` | Image generation tool | `registerTool`, Google Antigravity |
 | `inline-bash.ts` | Inline bash in tool calls | `on("tool_call")` |
+| `bash-spawn-hook.ts` | Adjust bash command, cwd, and env before execution | `createBashTool`, `spawnHook` |
 | `with-deps/` | Extension with npm dependencies | Package structure with `package.json` |

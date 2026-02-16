@@ -40,7 +40,7 @@ const calculatorSchema = Type.Object({
 });
 
 const calculatorTool: Tool<typeof calculatorSchema> = {
-	name: "calculator",
+	name: "math_operation",
 	description: "Perform basic arithmetic operations",
 	parameters: calculatorSchema,
 };
@@ -80,7 +80,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 		messages: [
 			{
 				role: "user",
-				content: "Calculate 15 + 27 using the calculator tool.",
+				content: "Calculate 15 + 27 using the math_operation tool.",
 				timestamp: Date.now(),
 			},
 		],
@@ -100,7 +100,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 			index = event.contentIndex;
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("calculator");
+				expect(toolCall.name).toBe("math_operation");
 				expect(toolCall.id).toBeTruthy();
 			}
 		}
@@ -110,7 +110,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 			expect(event.contentIndex).toBe(index);
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("calculator");
+				expect(toolCall.name).toBe("math_operation");
 				accumulatedToolArgs += event.delta;
 				// Check that we have a parsed arguments object during streaming
 				expect(toolCall.arguments).toBeDefined();
@@ -126,7 +126,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 			expect(event.contentIndex).toBe(index);
 			expect(toolCall.type).toBe("toolCall");
 			if (toolCall.type === "toolCall") {
-				expect(toolCall.name).toBe("calculator");
+				expect(toolCall.name).toBe("math_operation");
 				JSON.parse(accumulatedToolArgs);
 				expect(toolCall.arguments).not.toBeUndefined();
 				expect((toolCall.arguments as any).a).toBe(15);
@@ -145,7 +145,7 @@ async function handleToolCall<TApi extends Api>(model: Model<TApi>, options?: St
 	expect(response.content.some((b) => b.type === "toolCall")).toBeTruthy();
 	const toolCall = response.content.find((b) => b.type === "toolCall");
 	if (toolCall && toolCall.type === "toolCall") {
-		expect(toolCall.name).toBe("calculator");
+		expect(toolCall.name).toBe("math_operation");
 		expect(toolCall.id).toBeTruthy();
 	} else {
 		throw new Error("No tool call found in response");
@@ -272,7 +272,7 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 		messages: [
 			{
 				role: "user",
-				content: "Think about this briefly, then calculate 42 * 17 and 453 + 434 using the calculator tool.",
+				content: "Think about this briefly, then calculate 42 * 17 and 453 + 434 using the math_operation tool.",
 				timestamp: Date.now(),
 			},
 		],
@@ -302,7 +302,7 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 				hasSeenToolCalls = true;
 
 				// Process the tool call
-				expect(block.name).toBe("calculator");
+				expect(block.name).toBe("math_operation");
 				expect(block.id).toBeTruthy();
 				expect(block.arguments).toBeTruthy();
 
@@ -604,6 +604,30 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider (Kimi-K2.5 via OpenAI Completions)", () => {
+		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
+
+		it("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm);
+		});
+
+		it("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm);
+		});
+
+		it("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm);
+		});
+
+		it("should handle thinking mode", { retry: 3 }, async () => {
+			await handleThinking(llm, { reasoningEffort: "medium" });
+		});
+
+		it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+			await multiTurn(llm, { reasoningEffort: "medium" });
+		});
+	});
+
 	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter Provider (glm-4.5v via OpenAI Completions)", () => {
 		const llm = getModel("openrouter", "z-ai/glm-4.5v");
 
@@ -783,7 +807,7 @@ describe("Generate E2E Tests", () => {
 			});
 
 			it("should handle thinking mode", { retry: 3 }, async () => {
-				// FIXME Skip for now, getting a 422 stauts code, need to test with official SDK
+				// FIXME Skip for now, getting a 422 status code, need to test with official SDK
 				// const llm = getModel("mistral", "magistral-medium-latest");
 				// await handleThinking(llm, { reasoningEffort: "medium" });
 			});
@@ -838,6 +862,33 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.KIMI_API_KEY)(
+		"Kimi For Coding Provider (kimi-k2-thinking via Anthropic Messages)",
+		() => {
+			const llm = getModel("kimi-coding", "kimi-k2-thinking");
+
+			it("should complete basic text generation", { retry: 3 }, async () => {
+				await basicTextGeneration(llm);
+			});
+
+			it("should handle tool calling", { retry: 3 }, async () => {
+				await handleToolCall(llm);
+			});
+
+			it("should handle streaming", { retry: 3 }, async () => {
+				await handleStreaming(llm);
+			});
+
+			it("should handle thinking mode", { retry: 3 }, async () => {
+				await handleThinking(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
+			});
+
+			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+				await multiTurn(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
+			});
+		},
+	);
+
 	// =========================================================================
 	// OAuth-based providers (credentials from ~/.pi/agent/oauth.json)
 	// Tokens are resolved at module level (see oauthTokens above)
@@ -871,6 +922,42 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe("Anthropic OAuth Provider (claude-opus-4-6 with adaptive thinking)", () => {
+		const model = getModel("anthropic", "claude-opus-4-6");
+
+		it.skipIf(!anthropicOAuthToken)("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
+		});
+
+		it.skipIf(!anthropicOAuthToken)("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(model, { apiKey: anthropicOAuthToken });
+		});
+
+		it.skipIf(!anthropicOAuthToken)("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(model, { apiKey: anthropicOAuthToken });
+		});
+
+		it.skipIf(!anthropicOAuthToken)("should handle adaptive thinking with effort high", { retry: 3 }, async () => {
+			await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "high" });
+		});
+
+		it.skipIf(!anthropicOAuthToken)("should handle adaptive thinking with effort medium", { retry: 3 }, async () => {
+			await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "medium" });
+		});
+
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle multi-turn with adaptive thinking and tools",
+			{ retry: 3 },
+			async () => {
+				await multiTurn(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "high" });
+			},
+		);
+
+		it.skipIf(!anthropicOAuthToken)("should handle image input", { retry: 3 }, async () => {
+			await handleImage(model, { apiKey: anthropicOAuthToken });
+		});
+	});
+
 	describe("GitHub Copilot Provider (gpt-4o via OpenAI Completions)", () => {
 		const llm = getModel("github-copilot", "gpt-4o");
 
@@ -894,6 +981,34 @@ describe("Generate E2E Tests", () => {
 		it.skipIf(!githubCopilotToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
 			const thinkingModel = getModel("github-copilot", "gpt-5-mini");
 			await multiTurn(thinkingModel, { apiKey: githubCopilotToken, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!githubCopilotToken)("should handle image input", { retry: 3 }, async () => {
+			await handleImage(llm, { apiKey: githubCopilotToken });
+		});
+	});
+
+	describe("GitHub Copilot Provider (claude-sonnet-4 via Anthropic Messages)", () => {
+		const llm = getModel("github-copilot", "claude-sonnet-4");
+
+		it.skipIf(!githubCopilotToken)("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, { apiKey: githubCopilotToken });
+		});
+
+		it.skipIf(!githubCopilotToken)("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, { apiKey: githubCopilotToken });
+		});
+
+		it.skipIf(!githubCopilotToken)("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, { apiKey: githubCopilotToken });
+		});
+
+		it.skipIf(!githubCopilotToken)("should handle thinking", { retry: 2 }, async () => {
+			await handleThinking(llm, { apiKey: githubCopilotToken, thinkingEnabled: true });
+		});
+
+		it.skipIf(!githubCopilotToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+			await multiTurn(llm, { apiKey: githubCopilotToken, thinkingEnabled: true });
 		});
 
 		it.skipIf(!githubCopilotToken)("should handle image input", { retry: 3 }, async () => {
@@ -941,8 +1056,8 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
-	describe("Google Antigravity Provider (gemini-3-flash)", () => {
-		const llm = getModel("google-antigravity", "gemini-3-flash");
+	describe("Google Antigravity Provider (gemini-3-pro-high)", () => {
+		const llm = getModel("google-antigravity", "gemini-3-pro-high");
 
 		it.skipIf(!antigravityToken)("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm, { apiKey: antigravityToken });
@@ -957,7 +1072,7 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it.skipIf(!antigravityToken)("should handle thinking with thinkingLevel", { retry: 3 }, async () => {
-			// gemini-3-flash supports all four levels: MINIMAL, LOW, MEDIUM, HIGH
+			// gemini-3-pro only supports LOW/HIGH
 			await handleThinking(llm, {
 				apiKey: antigravityToken,
 				thinking: { enabled: true, level: "LOW" },
@@ -965,7 +1080,7 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it.skipIf(!antigravityToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-			await multiTurn(llm, { apiKey: antigravityToken, thinking: { enabled: true, level: "MEDIUM" } });
+			await multiTurn(llm, { apiKey: antigravityToken, thinking: { enabled: true, level: "HIGH" } });
 		});
 
 		it.skipIf(!antigravityToken)("should handle image input", { retry: 3 }, async () => {
@@ -1047,6 +1162,63 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
+	describe("OpenAI Codex Provider (gpt-5.3-codex)", () => {
+		const llm = getModel("openai-codex", "gpt-5.3-codex");
+
+		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, { apiKey: openaiCodexToken });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, { apiKey: openaiCodexToken });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle thinking with reasoningEffort high", { retry: 3 }, async () => {
+			await handleThinking(llm, { apiKey: openaiCodexToken, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+			await multiTurn(llm, { apiKey: openaiCodexToken, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
+			await handleImage(llm, { apiKey: openaiCodexToken });
+		});
+	});
+
+	describe("OpenAI Codex Provider (gpt-5.3-codex via WebSocket)", () => {
+		const llm = getModel("openai-codex", "gpt-5.3-codex");
+		const wsOptions = { apiKey: openaiCodexToken, transport: "websocket" as const };
+
+		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
+			await basicTextGeneration(llm, wsOptions);
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle tool calling", { retry: 3 }, async () => {
+			await handleToolCall(llm, wsOptions);
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle streaming", { retry: 3 }, async () => {
+			await handleStreaming(llm, wsOptions);
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle thinking with reasoningEffort high", { retry: 3 }, async () => {
+			await handleThinking(llm, { ...wsOptions, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
+			await multiTurn(llm, { ...wsOptions, reasoningEffort: "high" });
+		});
+
+		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
+			await handleImage(llm, wsOptions);
+		});
+	});
+
 	describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock Provider (claude-sonnet-4-5)", () => {
 		const llm = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0");
 
@@ -1072,6 +1244,50 @@ describe("Generate E2E Tests", () => {
 
 		it("should handle image input", { retry: 3 }, async () => {
 			await handleImage(llm);
+		});
+	});
+
+	describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock Provider (claude-opus-4-6 interleaved thinking)", () => {
+		const llm = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+
+		it("should use adaptive thinking without anthropic_beta", { retry: 3 }, async () => {
+			let capturedPayload: unknown;
+			const response = await complete(
+				llm,
+				{
+					systemPrompt: "You are a helpful assistant that uses tools when asked.",
+					messages: [
+						{
+							role: "user",
+							content: "Think first, then calculate 15 + 27 using the math_operation tool.",
+							timestamp: Date.now(),
+						},
+					],
+					tools: [calculatorTool],
+				},
+				{
+					reasoning: "xhigh",
+					interleavedThinking: true,
+					onPayload: (payload) => {
+						capturedPayload = payload;
+					},
+				},
+			);
+
+			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
+			expect(capturedPayload).toBeTruthy();
+
+			const payload = capturedPayload as {
+				additionalModelRequestFields?: {
+					thinking?: { type?: string };
+					output_config?: { effort?: string };
+					anthropic_beta?: string[];
+				};
+			};
+
+			expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive" });
+			expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "max" });
+			expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
 		});
 	});
 

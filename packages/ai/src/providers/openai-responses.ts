@@ -5,6 +5,7 @@ import { supportsXhigh } from "../models.js";
 import type {
 	Api,
 	AssistantMessage,
+	CacheRetention,
 	Context,
 	Model,
 	SimpleStreamOptions,
@@ -13,10 +14,39 @@ import type {
 	Usage,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+
+/**
+ * Resolve cache retention preference.
+ * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
+ */
+function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
+	if (cacheRetention) {
+		return cacheRetention;
+	}
+	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+		return "long";
+	}
+	return "short";
+}
+
+/**
+ * Get prompt cache retention based on cacheRetention and base URL.
+ * Only applies to direct OpenAI API calls (api.openai.com).
+ */
+function getPromptCacheRetention(baseUrl: string, cacheRetention: CacheRetention): "24h" | undefined {
+	if (cacheRetention !== "long") {
+		return undefined;
+	}
+	if (baseUrl.includes("api.openai.com")) {
+		return "24h";
+	}
+	return undefined;
+}
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
@@ -130,28 +160,12 @@ function createClient(
 
 	const headers = { ...model.headers };
 	if (model.provider === "github-copilot") {
-		// Copilot expects X-Initiator to indicate whether the request is user-initiated
-		// or agent-initiated (e.g. follow-up after assistant/tool messages). If there is
-		// no prior message, default to user-initiated.
-		const messages = context.messages || [];
-		const lastMessage = messages[messages.length - 1];
-		const isAgentCall = lastMessage ? lastMessage.role !== "user" : false;
-		headers["X-Initiator"] = isAgentCall ? "agent" : "user";
-		headers["Openai-Intent"] = "conversation-edits";
-
-		// Copilot requires this header when sending images
-		const hasImages = messages.some((msg) => {
-			if (msg.role === "user" && Array.isArray(msg.content)) {
-				return msg.content.some((c) => c.type === "image");
-			}
-			if (msg.role === "toolResult" && Array.isArray(msg.content)) {
-				return msg.content.some((c) => c.type === "image");
-			}
-			return false;
+		const hasImages = hasCopilotVisionInput(context.messages);
+		const copilotHeaders = buildCopilotDynamicHeaders({
+			messages: context.messages,
+			hasImages,
 		});
-		if (hasImages) {
-			headers["Copilot-Vision-Request"] = "true";
-		}
+		Object.assign(headers, copilotHeaders);
 	}
 
 	// Merge options headers last so they can override defaults
@@ -170,11 +184,14 @@ function createClient(
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
 
+	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		input: messages,
 		stream: true,
-		prompt_cache_key: options?.sessionId,
+		prompt_cache_key: cacheRetention === "none" ? undefined : options?.sessionId,
+		prompt_cache_retention: getPromptCacheRetention(model.baseUrl, cacheRetention),
+		store: false,
 	};
 
 	if (options?.maxTokens) {

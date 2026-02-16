@@ -41,8 +41,9 @@ Edit directly or use `/settings` for common options.
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
 | `quietStartup` | boolean | `false` | Hide startup header |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
-| `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"` or `"fork"` |
+| `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
+| `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 
 ### Compaction
@@ -76,13 +77,17 @@ Edit directly or use `/settings` for common options.
 | `retry.enabled` | boolean | `true` | Enable automatic retry on transient errors |
 | `retry.maxRetries` | number | `3` | Maximum retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for exponential backoff (2s, 4s, 8s) |
+| `retry.maxDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+
+When a provider requests a retry delay longer than `maxDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
 ```json
 {
   "retry": {
     "enabled": true,
     "maxRetries": 3,
-    "baseDelayMs": 2000
+    "baseDelayMs": 2000,
+    "maxDelayMs": 60000
   }
 }
 ```
@@ -93,12 +98,14 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
+| `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
 
 ### Terminal & Images
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `terminal.showImages` | boolean | `true` | Show images in terminal (if supported) |
+| `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
 

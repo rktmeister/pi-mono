@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { Transport } from "@mariozechner/pi-ai";
 import {
 	Container,
 	getCapabilities,
@@ -29,16 +30,19 @@ export interface SettingsConfig {
 	enableSkillCommands: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
+	transport: Transport;
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
 	currentTheme: string;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
 	collapseChangelog: boolean;
-	doubleEscapeAction: "fork" | "tree";
+	doubleEscapeAction: "fork" | "tree" | "none";
 	showHardwareCursor: boolean;
 	editorPaddingX: number;
+	autocompleteMaxVisible: number;
 	quietStartup: boolean;
+	clearOnShrink: boolean;
 }
 
 export interface SettingsCallbacks {
@@ -49,15 +53,18 @@ export interface SettingsCallbacks {
 	onEnableSkillCommandsChange: (enabled: boolean) => void;
 	onSteeringModeChange: (mode: "all" | "one-at-a-time") => void;
 	onFollowUpModeChange: (mode: "all" | "one-at-a-time") => void;
+	onTransportChange: (transport: Transport) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
-	onDoubleEscapeActionChange: (action: "fork" | "tree") => void;
+	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
 	onEditorPaddingXChange: (padding: number) => void;
+	onAutocompleteMaxVisibleChange: (maxVisible: number) => void;
 	onQuietStartupChange: (enabled: boolean) => void;
+	onClearOnShrinkChange: (enabled: boolean) => void;
 	onCancel: () => void;
 }
 
@@ -159,6 +166,13 @@ export class SettingsSelectorComponent extends Container {
 				values: ["one-at-a-time", "all"],
 			},
 			{
+				id: "transport",
+				label: "Transport",
+				description: "Preferred transport for providers that support multiple transports",
+				currentValue: config.transport,
+				values: ["sse", "websocket", "auto"],
+			},
+			{
 				id: "hide-thinking",
 				label: "Hide thinking",
 				description: "Hide thinking blocks in assistant responses",
@@ -184,7 +198,7 @@ export class SettingsSelectorComponent extends Container {
 				label: "Double-escape action",
 				description: "Action when pressing Escape twice with empty editor",
 				currentValue: config.doubleEscapeAction,
-				values: ["tree", "fork"],
+				values: ["tree", "fork", "none"],
 			},
 			{
 				id: "thinking",
@@ -300,6 +314,26 @@ export class SettingsSelectorComponent extends Container {
 			values: ["0", "1", "2", "3"],
 		});
 
+		// Autocomplete max visible toggle (insert after editor-padding)
+		const editorPaddingIndex = items.findIndex((item) => item.id === "editor-padding");
+		items.splice(editorPaddingIndex + 1, 0, {
+			id: "autocomplete-max-visible",
+			label: "Autocomplete max items",
+			description: "Max visible items in autocomplete dropdown (3-20)",
+			currentValue: String(config.autocompleteMaxVisible),
+			values: ["3", "5", "7", "10", "15", "20"],
+		});
+
+		// Clear on shrink toggle (insert after autocomplete-max-visible)
+		const autocompleteIndex = items.findIndex((item) => item.id === "autocomplete-max-visible");
+		items.splice(autocompleteIndex + 1, 0, {
+			id: "clear-on-shrink",
+			label: "Clear on shrink",
+			description: "Clear empty rows when content shrinks (may cause flicker)",
+			currentValue: config.clearOnShrink ? "true" : "false",
+			values: ["true", "false"],
+		});
+
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -330,6 +364,9 @@ export class SettingsSelectorComponent extends Container {
 					case "follow-up-mode":
 						callbacks.onFollowUpModeChange(newValue as "all" | "one-at-a-time");
 						break;
+					case "transport":
+						callbacks.onTransportChange(newValue as Transport);
+						break;
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
 						break;
@@ -347,6 +384,12 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "editor-padding":
 						callbacks.onEditorPaddingXChange(parseInt(newValue, 10));
+						break;
+					case "autocomplete-max-visible":
+						callbacks.onAutocompleteMaxVisibleChange(parseInt(newValue, 10));
+						break;
+					case "clear-on-shrink":
+						callbacks.onClearOnShrinkChange(newValue === "true");
 						break;
 				}
 			},

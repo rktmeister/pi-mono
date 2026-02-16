@@ -13,18 +13,19 @@ import { selectConfig } from "./cli/config-selector.js";
 import { processFileArguments } from "./cli/file-processor.js";
 import { listModels } from "./cli/list-models.js";
 import { selectSession } from "./cli/session-picker.js";
-import { getAgentDir, getModelsPath, VERSION } from "./config.js";
+import { APP_NAME, getAgentDir, getModelsPath, VERSION } from "./config.js";
 import { AuthStorage } from "./core/auth-storage.js";
+import { DEFAULT_THINKING_LEVEL } from "./core/defaults.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { LoadExtensionsResult } from "./core/extensions/index.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { ModelRegistry } from "./core/model-registry.js";
-import { resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
+import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { DefaultResourceLoader } from "./core/resource-loader.js";
 import { type CreateAgentSessionOptions, createAgentSession } from "./core/sdk.js";
 import { SessionManager } from "./core/session-manager.js";
-import { type PackageSource, SettingsManager } from "./core/settings-manager.js";
+import { SettingsManager } from "./core/settings-manager.js";
 import { printTimings, time } from "./core/timings.js";
 import { allTools } from "./core/tools/index.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
@@ -60,6 +61,75 @@ interface PackageCommandOptions {
 	command: PackageCommand;
 	source?: string;
 	local: boolean;
+	help: boolean;
+	invalidOption?: string;
+}
+
+function getPackageCommandUsage(command: PackageCommand): string {
+	switch (command) {
+		case "install":
+			return `${APP_NAME} install <source> [-l]`;
+		case "remove":
+			return `${APP_NAME} remove <source> [-l]`;
+		case "update":
+			return `${APP_NAME} update [source]`;
+		case "list":
+			return `${APP_NAME} list`;
+	}
+}
+
+function printPackageCommandHelp(command: PackageCommand): void {
+	switch (command) {
+		case "install":
+			console.log(`${chalk.bold("Usage:")}
+  ${getPackageCommandUsage("install")}
+
+Install a package and add it to settings.
+
+Options:
+  -l, --local    Install project-locally (.pi/settings.json)
+
+Examples:
+  ${APP_NAME} install npm:@foo/bar
+  ${APP_NAME} install git:github.com/user/repo
+  ${APP_NAME} install git:git@github.com:user/repo
+  ${APP_NAME} install https://github.com/user/repo
+  ${APP_NAME} install ssh://git@github.com/user/repo
+  ${APP_NAME} install ./local/path
+`);
+			return;
+
+		case "remove":
+			console.log(`${chalk.bold("Usage:")}
+  ${getPackageCommandUsage("remove")}
+
+Remove a package and its source from settings.
+
+Options:
+  -l, --local    Remove from project settings (.pi/settings.json)
+
+Example:
+  ${APP_NAME} remove npm:@foo/bar
+`);
+			return;
+
+		case "update":
+			console.log(`${chalk.bold("Usage:")}
+  ${getPackageCommandUsage("update")}
+
+Update installed packages.
+If <source> is provided, only that package is updated.
+`);
+			return;
+
+		case "list":
+			console.log(`${chalk.bold("Usage:")}
+  ${getPackageCommandUsage("list")}
+
+List installed packages from user and project settings.
+`);
+			return;
+	}
 }
 
 function parsePackageCommand(args: string[]): PackageCommandOptions | undefined {
@@ -69,73 +139,36 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	}
 
 	let local = false;
-	const sources: string[] = [];
+	let help = false;
+	let invalidOption: string | undefined;
+	let source: string | undefined;
+
 	for (const arg of rest) {
-		if (arg === "-l" || arg === "--local") {
-			local = true;
+		if (arg === "-h" || arg === "--help") {
+			help = true;
 			continue;
 		}
-		sources.push(arg);
+
+		if (arg === "-l" || arg === "--local") {
+			if (command === "install" || command === "remove") {
+				local = true;
+			} else {
+				invalidOption = invalidOption ?? arg;
+			}
+			continue;
+		}
+
+		if (arg.startsWith("-")) {
+			invalidOption = invalidOption ?? arg;
+			continue;
+		}
+
+		if (!source) {
+			source = arg;
+		}
 	}
 
-	return { command, source: sources[0], local };
-}
-
-function normalizeExtensionSource(source: string): { type: "npm" | "git" | "local"; key: string } {
-	if (source.startsWith("npm:")) {
-		const spec = source.slice("npm:".length).trim();
-		const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/);
-		return { type: "npm", key: match?.[1] ?? spec };
-	}
-	if (source.startsWith("git:")) {
-		const repo = source.slice("git:".length).trim().split("@")[0] ?? "";
-		return { type: "git", key: repo.replace(/^https?:\/\//, "").replace(/\.git$/, "") };
-	}
-	// Raw git URLs
-	if (source.startsWith("https://") || source.startsWith("http://")) {
-		const repo = source.split("@")[0] ?? "";
-		return { type: "git", key: repo.replace(/^https?:\/\//, "").replace(/\.git$/, "") };
-	}
-	return { type: "local", key: source };
-}
-
-function sourcesMatch(a: string, b: string): boolean {
-	const left = normalizeExtensionSource(a);
-	const right = normalizeExtensionSource(b);
-	return left.type === right.type && left.key === right.key;
-}
-
-function getPackageSourceString(pkg: PackageSource): string {
-	return typeof pkg === "string" ? pkg : pkg.source;
-}
-
-function packageSourcesMatch(a: PackageSource, b: string): boolean {
-	const aSource = getPackageSourceString(a);
-	return sourcesMatch(aSource, b);
-}
-
-function updatePackageSources(
-	settingsManager: SettingsManager,
-	source: string,
-	local: boolean,
-	action: "add" | "remove",
-): void {
-	const currentSettings = local ? settingsManager.getProjectSettings() : settingsManager.getGlobalSettings();
-	const currentPackages = currentSettings.packages ?? [];
-
-	let nextPackages: PackageSource[];
-	if (action === "add") {
-		const exists = currentPackages.some((existing) => packageSourcesMatch(existing, source));
-		nextPackages = exists ? currentPackages : [...currentPackages, source];
-	} else {
-		nextPackages = currentPackages.filter((existing) => !packageSourcesMatch(existing, source));
-	}
-
-	if (local) {
-		settingsManager.setProjectPackages(nextPackages);
-	} else {
-		settingsManager.setPackages(nextPackages);
-	}
+	return { command, source, local, help, invalidOption };
 }
 
 async function handlePackageCommand(args: string[]): Promise<boolean> {
@@ -144,90 +177,112 @@ async function handlePackageCommand(args: string[]): Promise<boolean> {
 		return false;
 	}
 
+	if (options.help) {
+		printPackageCommandHelp(options.command);
+		return true;
+	}
+
+	if (options.invalidOption) {
+		console.error(chalk.red(`Unknown option ${options.invalidOption} for "${options.command}".`));
+		console.error(chalk.dim(`Use "${APP_NAME} --help" or "${getPackageCommandUsage(options.command)}".`));
+		process.exitCode = 1;
+		return true;
+	}
+
+	const source = options.source;
+	if ((options.command === "install" || options.command === "remove") && !source) {
+		console.error(chalk.red(`Missing ${options.command} source.`));
+		console.error(chalk.dim(`Usage: ${getPackageCommandUsage(options.command)}`));
+		process.exitCode = 1;
+		return true;
+	}
+
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const settingsManager = SettingsManager.create(cwd, agentDir);
 	const packageManager = new DefaultPackageManager({ cwd, agentDir, settingsManager });
 
-	// Set up progress callback for CLI feedback
 	packageManager.setProgressCallback((event) => {
 		if (event.type === "start") {
 			process.stdout.write(chalk.dim(`${event.message}\n`));
-		} else if (event.type === "error") {
-			console.error(chalk.red(`Error: ${event.message}`));
 		}
 	});
 
-	if (options.command === "install") {
-		if (!options.source) {
-			console.error(chalk.red("Missing install source."));
-			process.exit(1);
+	try {
+		switch (options.command) {
+			case "install":
+				await packageManager.install(source!, { local: options.local });
+				packageManager.addSourceToSettings(source!, { local: options.local });
+				console.log(chalk.green(`Installed ${source}`));
+				return true;
+
+			case "remove": {
+				await packageManager.remove(source!, { local: options.local });
+				const removed = packageManager.removeSourceFromSettings(source!, { local: options.local });
+				if (!removed) {
+					console.error(chalk.red(`No matching package found for ${source}`));
+					process.exitCode = 1;
+					return true;
+				}
+				console.log(chalk.green(`Removed ${source}`));
+				return true;
+			}
+
+			case "list": {
+				const globalSettings = settingsManager.getGlobalSettings();
+				const projectSettings = settingsManager.getProjectSettings();
+				const globalPackages = globalSettings.packages ?? [];
+				const projectPackages = projectSettings.packages ?? [];
+
+				if (globalPackages.length === 0 && projectPackages.length === 0) {
+					console.log(chalk.dim("No packages installed."));
+					return true;
+				}
+
+				const formatPackage = (pkg: (typeof globalPackages)[number], scope: "user" | "project") => {
+					const source = typeof pkg === "string" ? pkg : pkg.source;
+					const filtered = typeof pkg === "object";
+					const display = filtered ? `${source} (filtered)` : source;
+					console.log(`  ${display}`);
+					const path = packageManager.getInstalledPath(source, scope);
+					if (path) {
+						console.log(chalk.dim(`    ${path}`));
+					}
+				};
+
+				if (globalPackages.length > 0) {
+					console.log(chalk.bold("User packages:"));
+					for (const pkg of globalPackages) {
+						formatPackage(pkg, "user");
+					}
+				}
+
+				if (projectPackages.length > 0) {
+					if (globalPackages.length > 0) console.log();
+					console.log(chalk.bold("Project packages:"));
+					for (const pkg of projectPackages) {
+						formatPackage(pkg, "project");
+					}
+				}
+
+				return true;
+			}
+
+			case "update":
+				await packageManager.update(source);
+				if (source) {
+					console.log(chalk.green(`Updated ${source}`));
+				} else {
+					console.log(chalk.green("Updated packages"));
+				}
+				return true;
 		}
-		await packageManager.install(options.source, { local: options.local });
-		updatePackageSources(settingsManager, options.source, options.local, "add");
-		console.log(chalk.green(`Installed ${options.source}`));
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : "Unknown package command error";
+		console.error(chalk.red(`Error: ${message}`));
+		process.exitCode = 1;
 		return true;
 	}
-
-	if (options.command === "remove") {
-		if (!options.source) {
-			console.error(chalk.red("Missing remove source."));
-			process.exit(1);
-		}
-		await packageManager.remove(options.source, { local: options.local });
-		updatePackageSources(settingsManager, options.source, options.local, "remove");
-		console.log(chalk.green(`Removed ${options.source}`));
-		return true;
-	}
-
-	if (options.command === "list") {
-		const globalSettings = settingsManager.getGlobalSettings();
-		const projectSettings = settingsManager.getProjectSettings();
-		const globalPackages = globalSettings.packages ?? [];
-		const projectPackages = projectSettings.packages ?? [];
-
-		if (globalPackages.length === 0 && projectPackages.length === 0) {
-			console.log(chalk.dim("No packages installed."));
-			return true;
-		}
-
-		const formatPackage = (pkg: (typeof globalPackages)[number], scope: "user" | "project") => {
-			const source = typeof pkg === "string" ? pkg : pkg.source;
-			const filtered = typeof pkg === "object";
-			const display = filtered ? `${source} (filtered)` : source;
-			console.log(`  ${display}`);
-			// Show resolved path
-			const path = packageManager.getInstalledPath(source, scope);
-			if (path) {
-				console.log(chalk.dim(`    ${path}`));
-			}
-		};
-
-		if (globalPackages.length > 0) {
-			console.log(chalk.bold("User packages:"));
-			for (const pkg of globalPackages) {
-				formatPackage(pkg, "user");
-			}
-		}
-
-		if (projectPackages.length > 0) {
-			if (globalPackages.length > 0) console.log();
-			console.log(chalk.bold("Project packages:"));
-			for (const pkg of projectPackages) {
-				formatPackage(pkg, "project");
-			}
-		}
-
-		return true;
-	}
-
-	await packageManager.update(options.source);
-	if (options.source) {
-		console.log(chalk.green(`Updated ${options.source}`));
-	} else {
-		console.log(chalk.green("Updated packages"));
-	}
-	return true;
 }
 
 async function prepareInitialMessage(
@@ -355,22 +410,42 @@ function buildSessionOptions(
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
-): CreateAgentSessionOptions {
+): { options: CreateAgentSessionOptions; cliThinkingFromModel: boolean } {
 	const options: CreateAgentSessionOptions = {};
+	let cliThinkingFromModel = false;
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
 	}
 
 	// Model from CLI
-	if (parsed.provider && parsed.model) {
-		const model = modelRegistry.find(parsed.provider, parsed.model);
-		if (!model) {
-			console.error(chalk.red(`Model ${parsed.provider}/${parsed.model} not found`));
+	// - supports --provider <name> --model <pattern>
+	// - supports --model <provider>/<pattern>
+	if (parsed.model) {
+		const resolved = resolveCliModel({
+			cliProvider: parsed.provider,
+			cliModel: parsed.model,
+			modelRegistry,
+		});
+		if (resolved.warning) {
+			console.warn(chalk.yellow(`Warning: ${resolved.warning}`));
+		}
+		if (resolved.error) {
+			console.error(chalk.red(resolved.error));
 			process.exit(1);
 		}
-		options.model = model;
-	} else if (scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
+		if (resolved.model) {
+			options.model = resolved.model;
+			// Allow "--model <pattern>:<thinking>" as a shorthand.
+			// Explicit --thinking still takes precedence (applied later).
+			if (!parsed.thinking && resolved.thinkingLevel) {
+				options.thinkingLevel = resolved.thinkingLevel;
+				cliThinkingFromModel = true;
+			}
+		}
+	}
+
+	if (!options.model && scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
 		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
@@ -399,7 +474,7 @@ function buildSessionOptions(
 
 	// Scoped models for Ctrl+P cycling - fill in default thinking level for models without explicit level
 	if (scopedModels.length > 0) {
-		const defaultThinkingLevel = settingsManager.getDefaultThinkingLevel() ?? "off";
+		const defaultThinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel ?? defaultThinkingLevel,
@@ -422,7 +497,7 @@ function buildSessionOptions(
 		options.tools = parsed.tools.map((name) => allTools[name]);
 	}
 
-	return options;
+	return { options, cliThinkingFromModel };
 }
 
 async function handleConfigCommand(args: string[]): Promise<boolean> {
@@ -516,18 +591,18 @@ export async function main(args: string[]) {
 
 	if (parsed.version) {
 		console.log(VERSION);
-		return;
+		process.exit(0);
 	}
 
 	if (parsed.help) {
 		printHelp();
-		return;
+		process.exit(0);
 	}
 
 	if (parsed.listModels !== undefined) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
-		return;
+		process.exit(0);
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
@@ -542,16 +617,17 @@ export async function main(args: string[]) {
 	}
 
 	if (parsed.export) {
+		let result: string;
 		try {
 			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
-			const result = await exportFromFile(parsed.export, outputPath);
-			console.log(`Exported to: ${result}`);
-			return;
+			result = await exportFromFile(parsed.export, outputPath);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Failed to export session";
 			console.error(chalk.red(`Error: ${message}`));
 			process.exit(1);
 		}
+		console.log(`Exported to: ${result}`);
+		process.exit(0);
 	}
 
 	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
@@ -595,7 +671,13 @@ export async function main(args: string[]) {
 		sessionManager = SessionManager.open(selectedPath);
 	}
 
-	const sessionOptions = buildSessionOptions(parsed, scopedModels, sessionManager, modelRegistry, settingsManager);
+	const { options: sessionOptions, cliThinkingFromModel } = buildSessionOptions(
+		parsed,
+		scopedModels,
+		sessionManager,
+		modelRegistry,
+		settingsManager,
+	);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.resourceLoader = resourceLoader;
@@ -603,7 +685,9 @@ export async function main(args: string[]) {
 	// Handle CLI --api-key as runtime override (not persisted)
 	if (parsed.apiKey) {
 		if (!sessionOptions.model) {
-			console.error(chalk.red("--api-key requires a model to be specified via --provider/--model or -m/--models"));
+			console.error(
+				chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models"),
+			);
 			process.exit(1);
 		}
 		authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsed.apiKey);
@@ -619,9 +703,11 @@ export async function main(args: string[]) {
 		process.exit(1);
 	}
 
-	// Clamp thinking level to model capabilities (for CLI override case)
-	if (session.model && parsed.thinking) {
-		let effectiveThinking = parsed.thinking;
+	// Clamp thinking level to model capabilities for CLI-provided thinking levels.
+	// This covers both --thinking <level> and --model <pattern>:<thinking>.
+	const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
+	if (session.model && cliThinkingOverride) {
+		let effectiveThinking = session.thinkingLevel;
 		if (!session.model.reasoning) {
 			effectiveThinking = "off";
 		} else if (effectiveThinking === "xhigh" && !supportsXhigh(session.model)) {

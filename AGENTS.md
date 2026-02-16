@@ -21,8 +21,11 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 
 ## Commands
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
+- Note: `npm run check` does not run tests.
 - NEVER run: `npm run dev`, `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npm test -- test/specific.test.ts`
+- Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
+- Run tests from the package root, not the repo root.
+- When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
 - NEVER commit unless user asks
 
 ## GitHub Issues
@@ -176,6 +179,7 @@ Multiple agents may work on different files in the same worktree simultaneously.
 
 ### Committing
 - **ONLY commit files YOU changed in THIS session**
+- ALWAYS include `fixes #<number>` or `closes #<number>` in the commit message when there is a related issue or PR
 - NEVER use `git add -A` or `git add .` - these sweep up changes from other agents
 - ALWAYS use `git add <specific-file-paths>` listing only files you modified
 - Before committing, run `git status` and verify you are only staging YOUR files
@@ -188,6 +192,7 @@ These commands can destroy other agents' work:
 - `git clean -fd` - deletes untracked files
 - `git stash` - stashes ALL changes including other agents' work
 - `git add -A` / `git add .` - stages other agents' uncommitted work
+- `git commit --no-verify` - bypasses required checks and is never allowed
 
 ### Safe Workflow
 ```bash

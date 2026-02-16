@@ -168,6 +168,8 @@ export interface SessionInfo {
 	cwd: string;
 	/** User-defined display name from session_info entries. */
 	name?: string;
+	/** Path to the parent session (if this session was forked). */
+	parentSessionPath?: string;
 	created: Date;
 	modified: Date;
 	messageCount: number;
@@ -587,6 +589,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		}
 
 		const cwd = typeof (header as SessionHeader).cwd === "string" ? (header as SessionHeader).cwd : "";
+		const parentSessionPath = (header as SessionHeader).parentSession;
 
 		const modified = getSessionModifiedDate(entries, header as SessionHeader, stats.mtime);
 
@@ -595,6 +598,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			id: (header as SessionHeader).id,
 			cwd,
 			name,
+			parentSessionPath,
 			created: new Date((header as SessionHeader).timestamp),
 			modified,
 			messageCount,
@@ -788,7 +792,11 @@ export class SessionManager {
 		if (!this.persist || !this.sessionFile) return;
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) return;
+		if (!hasAssistant) {
+			// Mark as not flushed so when assistant arrives, all entries get written
+			this.flushed = false;
+			return;
+		}
 
 		if (!this.flushed) {
 			for (const e of this.fileEntries) {
@@ -1146,6 +1154,7 @@ export class SessionManager {
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
+		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
@@ -1165,7 +1174,7 @@ export class SessionManager {
 			id: newSessionId,
 			timestamp,
 			cwd: this.cwd,
-			parentSession: this.persist ? this.sessionFile : undefined,
+			parentSession: this.persist ? previousSessionFile : undefined,
 		};
 
 		// Collect labels for entries in the path
@@ -1202,6 +1211,8 @@ export class SessionManager {
 			}
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
+			this.sessionFile = newSessionFile;
+			this.flushed = true;
 			this._buildIndex();
 			return newSessionFile;
 		}

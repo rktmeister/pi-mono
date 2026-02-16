@@ -35,10 +35,15 @@ import type {
 	MessageRenderer,
 	RegisteredCommand,
 	RegisteredTool,
+	ResourcesDiscoverEvent,
+	ResourcesDiscoverResult,
 	SessionBeforeCompactResult,
+	SessionBeforeForkResult,
+	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	ToolCallEvent,
 	ToolCallEventResult,
+	ToolResultEvent,
 	ToolResultEventResult,
 	UserBashEvent,
 	UserBashEventResult,
@@ -90,6 +95,42 @@ interface BeforeAgentStartCombinedResult {
 	systemPrompt?: string;
 }
 
+/**
+ * Events handled by the generic emit() method.
+ * Events with dedicated emitXxx() methods are excluded for stronger type safety.
+ */
+type RunnerEmitEvent = Exclude<
+	ExtensionEvent,
+	| ToolCallEvent
+	| ToolResultEvent
+	| UserBashEvent
+	| ContextEvent
+	| BeforeAgentStartEvent
+	| ResourcesDiscoverEvent
+	| InputEvent
+>;
+
+type SessionBeforeEvent = Extract<
+	RunnerEmitEvent,
+	{ type: "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" }
+>;
+
+type SessionBeforeEventResult =
+	| SessionBeforeSwitchResult
+	| SessionBeforeForkResult
+	| SessionBeforeCompactResult
+	| SessionBeforeTreeResult;
+
+type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
+	? SessionBeforeSwitchResult | undefined
+	: TEvent extends { type: "session_before_fork" }
+		? SessionBeforeForkResult | undefined
+		: TEvent extends { type: "session_before_compact" }
+			? SessionBeforeCompactResult | undefined
+			: TEvent extends { type: "session_before_tree" }
+				? SessionBeforeTreeResult | undefined
+				: undefined;
+
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
 export type NewSessionHandler = (options?: {
@@ -103,6 +144,10 @@ export type NavigateTreeHandler = (
 	targetId: string,
 	options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 ) => Promise<{ cancelled: boolean }>;
+
+export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled: boolean }>;
+
+export type ReloadHandler = () => Promise<void>;
 
 export type ShutdownHandler = () => void;
 
@@ -125,6 +170,7 @@ const noOpUIContext: ExtensionUIContext = {
 	confirm: async () => false,
 	input: async () => undefined,
 	notify: () => {},
+	onTerminalInput: () => () => {},
 	setStatus: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
@@ -132,6 +178,7 @@ const noOpUIContext: ExtensionUIContext = {
 	setHeader: () => {},
 	setTitle: () => {},
 	custom: async () => undefined as never,
+	pasteToEditor: () => {},
 	setEditorText: () => {},
 	getEditorText: () => "",
 	editor: async () => undefined,
@@ -142,6 +189,8 @@ const noOpUIContext: ExtensionUIContext = {
 	getAllThemes: () => [],
 	getTheme: () => undefined,
 	setTheme: (_theme: string | Theme) => ({ success: false, error: "UI not available" }),
+	getToolsExpanded: () => false,
+	setToolsExpanded: () => {},
 };
 
 export class ExtensionRunner {
@@ -159,11 +208,15 @@ export class ExtensionRunner {
 	private hasPendingMessagesFn: () => boolean = () => false;
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
+	private getSystemPromptFn: () => string = () => "";
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
+	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
+	private reloadHandler: ReloadHandler = async () => {};
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
+	private commandDiagnostics: ResourceDiagnostic[] = [];
 
 	constructor(
 		extensions: Extension[],
@@ -191,6 +244,7 @@ export class ExtensionRunner {
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
+		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
 		this.runtime.setThinkingLevel = actions.setThinkingLevel;
@@ -203,6 +257,7 @@ export class ExtensionRunner {
 		this.shutdownHandler = contextActions.shutdown;
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
+		this.getSystemPromptFn = contextActions.getSystemPrompt;
 
 		// Process provider registrations queued during extension loading
 		for (const { name, config } of this.runtime.pendingProviderRegistrations) {
@@ -217,6 +272,8 @@ export class ExtensionRunner {
 			this.newSessionHandler = actions.newSession;
 			this.forkHandler = actions.fork;
 			this.navigateTreeHandler = actions.navigateTree;
+			this.switchSessionHandler = actions.switchSession;
+			this.reloadHandler = actions.reload;
 			return;
 		}
 
@@ -224,6 +281,8 @@ export class ExtensionRunner {
 		this.newSessionHandler = async () => ({ cancelled: false });
 		this.forkHandler = async () => ({ cancelled: false });
 		this.navigateTreeHandler = async () => ({ cancelled: false });
+		this.switchSessionHandler = async () => ({ cancelled: false });
+		this.reloadHandler = async () => {};
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext): void {
@@ -362,14 +421,39 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	getRegisteredCommands(): RegisteredCommand[] {
+	getRegisteredCommands(reserved?: Set<string>): RegisteredCommand[] {
+		this.commandDiagnostics = [];
+
 		const commands: RegisteredCommand[] = [];
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
+				if (reserved?.has(command.name)) {
+					const message = `Extension command '${command.name}' from ${ext.path} conflicts with built-in commands. Skipping.`;
+					this.commandDiagnostics.push({ type: "warning", message, path: ext.path });
+					if (!this.hasUI()) {
+						console.warn(message);
+					}
+					continue;
+				}
+
 				commands.push(command);
 			}
 		}
 		return commands;
+	}
+
+	getCommandDiagnostics(): ResourceDiagnostic[] {
+		return this.commandDiagnostics;
+	}
+
+	getRegisteredCommandsWithPaths(): Array<{ command: RegisteredCommand; extensionPath: string }> {
+		const result: Array<{ command: RegisteredCommand; extensionPath: string }> = [];
+		for (const ext of this.extensions) {
+			for (const command of ext.commands.values()) {
+				result.push({ command, extensionPath: ext.path });
+			}
+		}
+		return result;
 	}
 
 	getCommand(name: string): RegisteredCommand | undefined {
@@ -411,6 +495,7 @@ export class ExtensionRunner {
 			shutdown: () => this.shutdownHandler(),
 			getContextUsage: () => this.getContextUsageFn(),
 			compact: (options) => this.compactFn(options),
+			getSystemPrompt: () => this.getSystemPromptFn(),
 		};
 	}
 
@@ -421,25 +506,23 @@ export class ExtensionRunner {
 			newSession: (options) => this.newSessionHandler(options),
 			fork: (entryId) => this.forkHandler(entryId),
 			navigateTree: (targetId, options) => this.navigateTreeHandler(targetId, options),
+			switchSession: (sessionPath) => this.switchSessionHandler(sessionPath),
+			reload: () => this.reloadHandler(),
 		};
 	}
 
-	private isSessionBeforeEvent(
-		type: string,
-	): type is "session_before_switch" | "session_before_fork" | "session_before_compact" | "session_before_tree" {
+	private isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
 		return (
-			type === "session_before_switch" ||
-			type === "session_before_fork" ||
-			type === "session_before_compact" ||
-			type === "session_before_tree"
+			event.type === "session_before_switch" ||
+			event.type === "session_before_fork" ||
+			event.type === "session_before_compact" ||
+			event.type === "session_before_tree"
 		);
 	}
 
-	async emit(
-		event: ExtensionEvent,
-	): Promise<SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined> {
+	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		const ctx = this.createContext();
-		let result: SessionBeforeCompactResult | SessionBeforeTreeResult | ToolResultEventResult | undefined;
+		let result: SessionBeforeEventResult | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
@@ -449,15 +532,11 @@ export class ExtensionRunner {
 				try {
 					const handlerResult = await handler(event, ctx);
 
-					if (this.isSessionBeforeEvent(event.type) && handlerResult) {
-						result = handlerResult as SessionBeforeCompactResult | SessionBeforeTreeResult;
+					if (this.isSessionBeforeEvent(event) && handlerResult) {
+						result = handlerResult as SessionBeforeEventResult;
 						if (result.cancel) {
-							return result;
+							return result as RunnerEmitResult<TEvent>;
 						}
-					}
-
-					if (event.type === "tool_result" && handlerResult) {
-						result = handlerResult as ToolResultEventResult;
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
@@ -472,7 +551,57 @@ export class ExtensionRunner {
 			}
 		}
 
-		return result;
+		return result as RunnerEmitResult<TEvent>;
+	}
+
+	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext();
+		const currentEvent: ToolResultEvent = { ...event };
+		let modified = false;
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("tool_result");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
+					if (!handlerResult) continue;
+
+					if (handlerResult.content !== undefined) {
+						currentEvent.content = handlerResult.content;
+						modified = true;
+					}
+					if (handlerResult.details !== undefined) {
+						currentEvent.details = handlerResult.details;
+						modified = true;
+					}
+					if (handlerResult.isError !== undefined) {
+						currentEvent.isError = handlerResult.isError;
+						modified = true;
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "tool_result",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		if (!modified) {
+			return undefined;
+		}
+
+		return {
+			content: currentEvent.content,
+			details: currentEvent.details,
+			isError: currentEvent.isError,
+		};
 	}
 
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
@@ -614,6 +743,54 @@ export class ExtensionRunner {
 		}
 
 		return undefined;
+	}
+
+	async emitResourcesDiscover(
+		cwd: string,
+		reason: ResourcesDiscoverEvent["reason"],
+	): Promise<{
+		skillPaths: Array<{ path: string; extensionPath: string }>;
+		promptPaths: Array<{ path: string; extensionPath: string }>;
+		themePaths: Array<{ path: string; extensionPath: string }>;
+	}> {
+		const ctx = this.createContext();
+		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
+		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
+		const themePaths: Array<{ path: string; extensionPath: string }> = [];
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("resources_discover");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const event: ResourcesDiscoverEvent = { type: "resources_discover", cwd, reason };
+					const handlerResult = await handler(event, ctx);
+					const result = handlerResult as ResourcesDiscoverResult | undefined;
+
+					if (result?.skillPaths?.length) {
+						skillPaths.push(...result.skillPaths.map((path) => ({ path, extensionPath: ext.path })));
+					}
+					if (result?.promptPaths?.length) {
+						promptPaths.push(...result.promptPaths.map((path) => ({ path, extensionPath: ext.path })));
+					}
+					if (result?.themePaths?.length) {
+						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "resources_discover",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return { skillPaths, promptPaths, themePaths };
 	}
 
 	/** Emit input event. Transforms chain, "handled" short-circuits. */

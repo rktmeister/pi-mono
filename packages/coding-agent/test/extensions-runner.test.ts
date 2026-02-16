@@ -279,6 +279,35 @@ describe("ExtensionRunner", () => {
 			const missing = runner.getCommand("not-exists");
 			expect(missing).toBeUndefined();
 		});
+
+		it("filters out commands conflict with reseved", async () => {
+			const cmdCode = (name: string) => `
+				export default function(pi) {
+					pi.registerCommand("${name}", {
+						description: "Test command",
+						handler: async () => {},
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "cmd-a.ts"), cmdCode("cmd-a"));
+			fs.writeFileSync(path.join(extensionsDir, "cmd-b.ts"), cmdCode("cmd-b"));
+
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const commands = runner.getRegisteredCommands(new Set(["cmd-a"]));
+			const diagnostics = runner.getCommandDiagnostics();
+
+			expect(commands.length).toBe(1);
+			expect(commands.map((c) => c.name).sort()).toEqual(["cmd-b"]);
+
+			expect(diagnostics.length).toBe(1);
+			expect(diagnostics[0].path).toEqual(path.join(extensionsDir, "cmd-a.ts"));
+
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in command"));
+			warnSpy.mockRestore();
+		});
 	});
 
 	describe("error handling", () => {
@@ -367,6 +396,98 @@ describe("ExtensionRunner", () => {
 
 			// The flag values are stored in the shared runtime
 			expect(result.runtime.flagValues.get("--test-flag")).toBe(true);
+		});
+	});
+
+	describe("tool_result chaining", () => {
+		it("chains content modifications across handlers", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("tool_result", async (event) => {
+						return {
+							content: [...event.content, { type: "text", text: "ext1" }],
+						};
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("tool_result", async (event) => {
+						return {
+							content: [...event.content, { type: "text", text: "ext2" }],
+						};
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-1.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-2.ts"), extCode2);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const chained = await runner.emitToolResult({
+				type: "tool_result",
+				toolName: "my_tool",
+				toolCallId: "call-1",
+				input: {},
+				content: [{ type: "text", text: "base" }],
+				details: { initial: true },
+				isError: false,
+			});
+
+			expect(chained).toBeDefined();
+			const chainedContent = chained?.content;
+			expect(chainedContent).toBeDefined();
+			expect(chainedContent![0]).toEqual({ type: "text", text: "base" });
+			expect(chainedContent).toHaveLength(3);
+			const appendedText = chainedContent!
+				.slice(1)
+				.filter((item): item is { type: "text"; text: string } => item.type === "text")
+				.map((item) => item.text);
+			expect(appendedText.sort()).toEqual(["ext1", "ext2"]);
+		});
+
+		it("preserves previous modifications when later handlers return partial patches", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("tool_result", async () => {
+						return {
+							content: [{ type: "text", text: "first" }],
+							details: { source: "ext1" },
+						};
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("tool_result", async () => {
+						return {
+							isError: true,
+						};
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-partial-1.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-partial-2.ts"), extCode2);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const chained = await runner.emitToolResult({
+				type: "tool_result",
+				toolName: "my_tool",
+				toolCallId: "call-2",
+				input: {},
+				content: [{ type: "text", text: "base" }],
+				details: { initial: true },
+				isError: false,
+			});
+
+			expect(chained).toEqual({
+				content: [{ type: "text", text: "first" }],
+				details: { source: "ext1" },
+				isError: true,
+			});
 		});
 	});
 

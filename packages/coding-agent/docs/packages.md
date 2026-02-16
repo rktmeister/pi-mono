@@ -23,6 +23,8 @@ Pi packages bundle extensions, skills, prompt templates, and themes so you can s
 pi install npm:@foo/bar@1.0.0
 pi install git:github.com/user/repo@v1
 pi install https://github.com/user/repo  # raw URLs work too
+pi install /absolute/path/to/package
+pi install ./relative/path/to/package
 
 pi remove npm:@foo/bar
 pi list    # show installed packages from settings
@@ -57,13 +59,31 @@ npm:pkg
 
 ```
 git:github.com/user/repo@v1
+git:git@github.com:user/repo@v1
 https://github.com/user/repo@v1
+ssh://git@github.com/user/repo@v1
 ```
 
-- Raw `https://` URLs work without the `git:` prefix.
+- Without `git:` prefix, only protocol URLs are accepted (`https://`, `http://`, `ssh://`, `git://`).
+- With `git:` prefix, shorthand formats are accepted, including `github.com/user/repo` and `git@github.com:user/repo`.
+- HTTPS and SSH URLs are both supported.
+- SSH URLs use your configured SSH keys automatically (respects `~/.ssh/config`).
+- For non-interactive runs (for example CI), you can set `GIT_TERMINAL_PROMPT=0` to disable credential prompts and set `GIT_SSH_COMMAND` (for example `ssh -o BatchMode=yes -o ConnectTimeout=5`) to fail fast.
 - Refs pin the package and skip `pi update`.
 - Cloned to `~/.pi/agent/git/<host>/<path>` (global) or `.pi/git/<host>/<path>` (project).
 - Runs `npm install` after clone or pull if `package.json` exists.
+
+**SSH examples:**
+```bash
+# git@host:path shorthand (requires git: prefix)
+pi install git:git@github.com:user/repo
+
+# ssh:// protocol format
+pi install ssh://git@github.com/user/repo
+
+# With version ref
+pi install git:git@github.com:user/repo@v1.0.0
+```
 
 ### Local Paths
 
@@ -72,7 +92,7 @@ https://github.com/user/repo@v1
 ./relative/path/to/package
 ```
 
-Local paths work in settings but not with `pi install`. If the path is a file, it loads as a single extension. If it is a directory, pi loads resources using package rules.
+Local paths point to files or directories on disk and are added to settings without copying. Relative paths are resolved against the settings file they appear in. If the path is a file, it loads as a single extension. If it is a directory, pi loads resources using package rules.
 
 ## Creating a Pi Package
 
@@ -92,6 +112,27 @@ Add a `pi` manifest to `package.json` or use conventional directories. Include t
 ```
 
 Paths are relative to the package root. Arrays support glob patterns and `!exclusions`.
+
+### Gallery Metadata
+
+The [package gallery](https://shittycodingagent.ai/packages) displays packages tagged with `pi-package`. Add `video` or `image` fields to show a preview:
+
+```json
+{
+  "name": "my-package",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"],
+    "video": "https://example.com/demo.mp4",
+    "image": "https://example.com/screenshot.png"
+  }
+}
+```
+
+- **video**: MP4 only. On desktop, autoplays on hover. Clicking opens a fullscreen player.
+- **image**: PNG, JPEG, GIF, or WebP. Displayed as a static preview.
+
+If both are set, video takes precedence.
 
 ## Package Structure
 

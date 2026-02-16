@@ -29,6 +29,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -128,7 +129,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 							partial: output,
 						});
 					} else if (block.type === "toolCall") {
-						block.arguments = JSON.parse(block.partialArgs || "{}");
+						block.arguments = parseStreamingJson(block.partialArgs);
 						delete block.partialArgs;
 						stream.push({
 							type: "toolcall_end",
@@ -333,10 +334,12 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const reasoningEffort = supportsXhigh(model) ? options?.reasoning : clampReasoning(options?.reasoning);
+	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,
 		reasoningEffort,
+		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
 
@@ -357,28 +360,12 @@ function createClient(
 
 	const headers = { ...model.headers };
 	if (model.provider === "github-copilot") {
-		// Copilot expects X-Initiator to indicate whether the request is user-initiated
-		// or agent-initiated (e.g. follow-up after assistant/tool messages). If there is
-		// no prior message, default to user-initiated.
-		const messages = context.messages || [];
-		const lastMessage = messages[messages.length - 1];
-		const isAgentCall = lastMessage ? lastMessage.role !== "user" : false;
-		headers["X-Initiator"] = isAgentCall ? "agent" : "user";
-		headers["Openai-Intent"] = "conversation-edits";
-
-		// Copilot requires this header when sending images
-		const hasImages = messages.some((msg) => {
-			if (msg.role === "user" && Array.isArray(msg.content)) {
-				return msg.content.some((c) => c.type === "image");
-			}
-			if (msg.role === "toolResult" && Array.isArray(msg.content)) {
-				return msg.content.some((c) => c.type === "image");
-			}
-			return false;
+		const hasImages = hasCopilotVisionInput(context.messages);
+		const copilotHeaders = buildCopilotDynamicHeaders({
+			messages: context.messages,
+			hasImages,
 		});
-		if (hasImages) {
-			headers["Copilot-Vision-Request"] = "true";
-		}
+		Object.assign(headers, copilotHeaders);
 	}
 
 	// Merge options headers last so they can override defaults
@@ -426,7 +413,7 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	}
 
 	if (context.tools) {
-		params.tools = convertTools(context.tools);
+		params.tools = convertTools(context.tools, compat);
 	} else if (hasToolHistory(context.messages)) {
 		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
 		params.tools = [];
@@ -440,6 +427,9 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		// Z.ai uses binary thinking: { type: "enabled" | "disabled" }
 		// Must explicitly disable since z.ai defaults to thinking enabled
 		(params as any).thinking = { type: options?.reasoningEffort ? "enabled" : "disabled" };
+	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
+		// Qwen uses enable_thinking: boolean
+		(params as any).enable_thinking = !!options?.reasoningEffort;
 	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
 		// OpenAI-style reasoning_effort
 		params.reasoning_effort = options.reasoningEffort;
@@ -448,6 +438,17 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 	// OpenRouter provider routing preferences
 	if (model.baseUrl.includes("openrouter.ai") && model.compat?.openRouterRouting) {
 		(params as any).provider = model.compat.openRouterRouting;
+	}
+
+	// Vercel AI Gateway provider routing preferences
+	if (model.baseUrl.includes("ai-gateway.vercel.sh") && model.compat?.vercelGatewayRouting) {
+		const routing = model.compat.vercelGatewayRouting;
+		if (routing.only || routing.order) {
+			const gatewayOptions: Record<string, string[]> = {};
+			if (routing.only) gatewayOptions.only = routing.only;
+			if (routing.order) gatewayOptions.order = routing.order;
+			(params as any).providerOptions = { gateway: gatewayOptions };
+		}
 	}
 
 	return params;
@@ -495,11 +496,18 @@ export function convertMessages(
 
 	const normalizeToolCallId = (id: string): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id);
-		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
-		// Copilot Claude models route to Claude backend which requires Anthropic ID format
-		if (model.provider === "github-copilot" && model.id.toLowerCase().includes("claude")) {
-			return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+
+		// Handle pipe-separated IDs from OpenAI Responses API
+		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
+		// These come from providers like github-copilot, openai-codex, opencode
+		// Extract just the call_id part and normalize it
+		if (id.includes("|")) {
+			const [callId] = id.split("|");
+			// Sanitize to allowed chars and truncate to 40 chars (OpenAI limit)
+			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
 		}
+
+		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
 		return id;
 	};
 
@@ -711,14 +719,18 @@ export function convertMessages(
 	return params;
 }
 
-function convertTools(tools: Tool[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
+function convertTools(
+	tools: Tool[],
+	compat: Required<OpenAICompletionsCompat>,
+): OpenAI.Chat.Completions.ChatCompletionTool[] {
 	return tools.map((tool) => ({
 		type: "function",
 		function: {
 			name: tool.name,
 			description: tool.description,
 			parameters: tool.parameters as any, // TypeBox already generates JSON Schema
-			strict: false, // Disable strict mode to allow optional parameters without null unions
+			// Only include strict if provider supports it. Some reject unknown fields.
+			...(compat.supportsStrictMode !== false && { strict: false }),
 		},
 	}));
 }
@@ -761,6 +773,7 @@ function detectCompat(model: Model<"openai-completions">): Required<OpenAIComple
 		provider === "mistral" ||
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
+		baseUrl.includes("deepseek.com") ||
 		isZai ||
 		provider === "opencode" ||
 		baseUrl.includes("opencode.ai");
@@ -783,6 +796,8 @@ function detectCompat(model: Model<"openai-completions">): Required<OpenAIComple
 		requiresMistralToolIds: isMistral,
 		thinkingFormat: isZai ? "zai" : "openai",
 		openRouterRouting: {},
+		vercelGatewayRouting: {},
+		supportsStrictMode: true,
 	};
 }
 
@@ -807,5 +822,7 @@ function getCompat(model: Model<"openai-completions">): Required<OpenAICompletio
 		requiresMistralToolIds: model.compat.requiresMistralToolIds ?? detected.requiresMistralToolIds,
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
 		openRouterRouting: model.compat.openRouterRouting ?? {},
+		vercelGatewayRouting: model.compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
+		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 	};
 }

@@ -155,11 +155,14 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	}
 
 	private buildItems(): ModelItem[] {
-		return getSortedIds(this.enabledIds, this.allIds).map((id) => ({
-			fullId: id,
-			model: this.modelsById.get(id)!,
-			enabled: isEnabled(this.enabledIds, id),
-		}));
+		// Filter out IDs that no longer have a corresponding model (e.g., after logout)
+		return getSortedIds(this.enabledIds, this.allIds)
+			.filter((id) => this.modelsById.has(id))
+			.map((id) => ({
+				fullId: id,
+				model: this.modelsById.get(id)!,
+				enabled: isEnabled(this.enabledIds, id),
+			}));
 	}
 
 	private getFooterText(): string {
@@ -211,6 +214,12 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			this.listContainer.addChild(
 				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0),
 			);
+		}
+
+		if (this.filteredItems.length > 0) {
+			const selected = this.filteredItems[this.selectedIndex];
+			this.listContainer.addChild(new Spacer(1));
+			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
 		}
 	}
 

@@ -21,12 +21,14 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, etc.
 |--------|---------|-------------|
 | `cursorUp` | `up` | Move cursor up |
 | `cursorDown` | `down` | Move cursor down |
-| `cursorLeft` | `left` | Move cursor left |
-| `cursorRight` | `right` | Move cursor right |
-| `cursorWordLeft` | `alt+left`, `ctrl+left` | Move cursor word left |
-| `cursorWordRight` | `alt+right`, `ctrl+right` | Move cursor word right |
+| `cursorLeft` | `left`, `ctrl+b` | Move cursor left |
+| `cursorRight` | `right`, `ctrl+f` | Move cursor right |
+| `cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
+| `cursorWordRight` | `alt+right`, `ctrl+right`, `alt+f` | Move cursor word right |
 | `cursorLineStart` | `home`, `ctrl+a` | Move to line start |
 | `cursorLineEnd` | `end`, `ctrl+e` | Move to line end |
+| `jumpForward` | `ctrl+]` | Jump forward to character |
+| `jumpBackward` | `ctrl+alt+]` | Jump backward to character |
 | `pageUp` | `pageUp` | Scroll up by page |
 | `pageDown` | `pageDown` | Scroll down by page |
 
@@ -35,7 +37,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, etc.
 | Action | Default | Description |
 |--------|---------|-------------|
 | `deleteCharBackward` | `backspace` | Delete character backward |
-| `deleteCharForward` | `delete` | Delete character forward |
+| `deleteCharForward` | `delete`, `ctrl+d` | Delete character forward |
 | `deleteWordBackward` | `ctrl+w`, `alt+backspace` | Delete word backward |
 | `deleteWordForward` | `alt+d`, `alt+delete` | Delete word forward |
 | `deleteToLineStart` | `ctrl+u` | Delete to line start |
@@ -73,6 +75,15 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, etc.
 | `exit` | `ctrl+d` | Exit (when editor empty) |
 | `suspend` | `ctrl+z` | Suspend to background |
 | `externalEditor` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
+
+### Session
+
+| Action | Default | Description |
+|--------|---------|-------------|
+| `newSession` | *(none)* | Start a new session (`/new`) |
+| `tree` | *(none)* | Open session tree navigator (`/tree`) |
+| `fork` | *(none)* | Fork current session (`/fork`) |
+| `resume` | *(none)* | Open session resume picker (`/resume`) |
 
 ### Models & Thinking
 
@@ -114,6 +125,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, etc.
 |--------|---------|-------------|
 | `toggleSessionPath` | `ctrl+p` | Toggle path display |
 | `toggleSessionSort` | `ctrl+s` | Toggle sort mode |
+| `toggleSessionNamedFilter` | `ctrl+n` | Toggle named-only filter |
 | `renameSession` | `ctrl+r` | Rename session |
 | `deleteSession` | `ctrl+d` | Delete session |
 | `deleteSessionNoninvasive` | `ctrl+backspace` | Delete session (when query empty) |
